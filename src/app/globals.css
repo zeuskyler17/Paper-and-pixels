@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Paper & Pixels — industrial design system
+ * Graphite chrome, steel-gray canvas, one signal-red accent, IBM Plex type,
+ * tabular (equal-width) figures for every number and document code.
+ */
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    @apply bg-[#eef0f3] font-sans text-[14px] text-slate-900 antialiased;
+    font-feature-settings: 'ss01' on;
+  }
+  h1, h2, h3 { @apply tracking-tight text-slate-900; }
+  ::selection { @apply bg-brand-100 text-brand-900; }
+  :focus-visible { @apply outline-none ring-2 ring-brand-500/60 ring-offset-1; }
+}
+
+@layer components {
+  /* ── Form controls ─────────────────────────────────────── */
+  .input {
+    @apply block h-9 w-full rounded border border-slate-300 bg-white px-3 text-[13.5px] text-slate-900
+      shadow-[inset_0_1px_1px_rgba(16,24,40,0.04)] transition placeholder:text-slate-400
+      hover:border-slate-400 focus:border-brand-600 focus:outline-none focus:ring-2 focus:ring-brand-600/15
+      disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500;
+  }
+  textarea.input { @apply h-auto py-2; }
+  select.input { @apply pr-8; }
+  input[type='file'].input { @apply h-auto py-1.5; }
+  .label { @apply mb-1.5 block text-[11px] font-semibold uppercase tracking-[0.07em] text-slate-500; }
+
+  /* ── Buttons ───────────────────────────────────────────── */
+  .btn {
+    @apply inline-flex h-9 select-none items-center justify-center gap-1.5 whitespace-nowrap rounded px-3.5
+      text-[13px] font-semibold tracking-[0.01em] transition
+      disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary { @apply btn bg-brand-600 text-white shadow-[inset_0_-1px_0_rgba(0,0,0,0.18)] hover:bg-brand-700 active:bg-brand-800; }
+  .btn-secondary { @apply btn border border-slate-300 bg-white text-slate-700 shadow-panel hover:border-slate-400 hover:bg-slate-50; }
+  .btn-dark { @apply btn bg-graphite-800 text-white hover:bg-graphite-900; }
+  .btn-danger { @apply btn border border-red-700 bg-red-600 text-white hover:bg-red-700; }
+  .btn-sm { @apply h-7 px-2.5 text-xs; }
+
+  /* ── Surfaces ──────────────────────────────────────────── */
+  .card { @apply rounded-md border border-slate-200/90 bg-white shadow-panel; }
+
+  /* ── Data tables ───────────────────────────────────────── */
+  .table { @apply min-w-full border-collapse text-[13px]; }
+  .table th {
+    @apply whitespace-nowrap border-b border-slate-200 bg-slate-50/80 px-3 py-2 text-left text-[10.5px]
+      font-semibold uppercase tracking-[0.08em] text-slate-500;
+  }
+  .table td { @apply border-b border-slate-100 px-3 py-2.5 align-top text-slate-700; }
+  .table tbody tr { @apply transition-colors; }
+  .table tbody tr:hover { @apply bg-slate-50/80; }
+  .table tbody tr:last-child td { @apply border-b-0; }
+  .table tfoot td { @apply border-t-2 border-slate-300 bg-slate-50; }
+  /* Right-aligned cells are figures (money, qty): tabular digits so columns align. */
+  .table td.text-right, .table th.text-right { @apply font-mono tabular-nums; }
+  .table th.text-right { @apply font-sans; }
+
+  .link { @apply font-medium text-brand-700 underline-offset-2 hover:text-brand-800 hover:underline; }
+
+  /* Figures & document codes */
+  .num { @apply font-mono tabular-nums; }
+}
+
+/* Print views: hide app chrome */
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; }
+}
+
+/* Figures: equal-width lining digits in IBM Plex Sans (readable, and columns still align). */
+.font-mono, .num, .tabular-nums {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: 'tnum' 1, 'lnum' 1;
+  letter-spacing: 0;
+}
+
+/* Scrollbars — slim steel thumbs, no white gutter. Sidebar: dark track to match the graphite panel. */
+* { scrollbar-width: thin; scrollbar-color: #94a3b8 transparent; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #b6c0cd; border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: #7c8a9c; background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+
+.nav-scroll { scrollbar-width: thin; scrollbar-color: #334155 transparent; }
+.nav-scroll::-webkit-scrollbar { width: 6px; }
+.nav-scroll::-webkit-scrollbar-track { background: transparent; }
+.nav-scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 6px; border: 1px solid transparent; background-clip: content-box; }
+.nav-scroll::-webkit-scrollbar-thumb:hover { background: #1f6ff0; background-clip: content-box; }

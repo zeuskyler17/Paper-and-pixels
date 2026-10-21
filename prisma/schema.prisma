@@ -1,0 +1,1048 @@
+// Paper & Pixels — POS + Job Order + Inventory
+// Conventions:
+//   * Money is stored as INTEGER CENTAVOS (Int). ₱1,234.50 => 123450. Never floats.
+//   * Material quantities are Float rounded to 3 decimals (e.g. 2.5 sheets, 120.000 ml).
+//   * All timestamps are stored in UTC and displayed in Asia/Manila.
+//   * Nothing financial is ever deleted: orders are Cancelled, payments/expenses are Voided.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Enums ─────────────────────────
+
+enum Role {
+  ADMIN
+  STAFF
+  WORKER
+  INVENTORY // inventory personnel: inventory pages only
+}
+
+enum OrderStatus {
+  PENDING
+  IN_PRODUCTION
+  COMPLETED
+  DELIVERED
+  CANCELLED
+}
+
+enum PaymentStatus {
+  UNPAID
+  PARTIAL
+  PAID
+}
+
+enum PaymentTerms {
+  FULL
+  DOWNPAYMENT
+  PAY_AFTER
+  CREDIT
+}
+
+enum PaymentMethod {
+  CASH
+  GCASH
+  MAYA
+  BANK_TRANSFER
+  OTHER
+}
+
+enum FileSource {
+  NONE
+  GMAIL
+  USB
+  MESSENGER
+  OTHER
+}
+
+enum PricingMode {
+  FIXED // price per piece
+  PER_SQFT // basePrice is per square foot (tarpaulin, etc.)
+}
+
+enum OptionType {
+  SELECT // pick one value (cover type, size, frame model)
+  MULTI // pick any number of values (add-ons)
+  NUMBER // enter a number, priced per unit (number of leaves)
+}
+
+enum JobStatus {
+  PENDING
+  IN_PROCESS
+  QUALITY_CHECK
+  COMPLETED
+  CANCELLED
+}
+
+enum MaterialLevel {
+  RAW_RAW
+  RAW
+  CONSUMABLE
+  GENERAL /// "Daily consumption": supplies used up day to day (tape, gloves, alcohol, cleaning)
+  FINISHED /// Finished product received from the main branch (branch inventories only)
+}
+
+/// What a material is for (product line). SHARED = used by more than one line.
+enum MaterialUse {
+  ALBUM
+  FRAME
+  PRINTING
+  GENERAL
+  SHARED
+}
+
+enum MovementType {
+  STOCK_IN
+  STOCK_OUT
+  ADJUSTMENT
+  CONVERSION_IN
+  CONVERSION_OUT
+  JOB_DEDUCT
+}
+
+enum POStatus {
+  DRAFT
+  SENT
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum DeliveryMethod {
+  PICKUP
+  LALAMOVE_GRAB
+  LBC_JNT
+  OWN_DELIVERY
+}
+
+enum DeliveryStatus {
+  SCHEDULED
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+// ───────────────────────── Users & settings ─────────────────────────
+
+model User {
+  id              Int      @id @default(autoincrement())
+  username        String   @unique
+  name            String
+  passwordHash    String
+  /// ADMIN only: bcrypt hash of the 4–6 digit approval PIN used to approve voids and discounts.
+  approvalPinHash String?
+  role            Role
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  ordersCreated     Order[]              @relation("OrderCreatedBy")
+  discountsApproved Order[]              @relation("DiscountApprovedBy")
+  employee          Employee?            @relation("EmployeeUser")
+  incidentsLogged   Incident[]           @relation("IncidentCreatedBy")
+  paymentsReceived  Payment[]            @relation("PaymentReceivedBy")
+  paymentsVoided    Payment[]            @relation("PaymentVoidedBy")
+  voidsApproved     Payment[]            @relation("PaymentVoidApprovedBy")
+  jobsAssigned      Job[]                @relation("JobAssignedTo")
+  jobsDelegated     Job[]                @relation("JobAssignedBy")
+  jobLogs           JobStatusLog[]
+  stockMovements    StockMovement[]      @relation("StockMovedBy")
+  materialsReceived StockMovement[]      @relation("StockReleasedTo")
+  conversions       MaterialConversion[]
+  purchaseOrders    PurchaseOrder[]
+  supplierPayments  SupplierPayment[]
+  expenses          Expense[]
+  deliveries        Delivery[]
+  attachments       Attachment[]
+  auditLogs         AuditLog[]
+  /// Access role (permissions). The `role` enum is kept only for ADMIN vs non-admin in older data.
+  accessRole        AccessRole?          @relation(fields: [accessRoleId], references: [id])
+  accessRoleId      Int?
+
+  @@map("users")
+}
+
+model Setting {
+  key   String @id
+  value String
+
+  @@map("settings")
+}
+
+/// Gap-free sequential numbers (order no., receipt no., PO no.). Incremented inside the
+/// same DB transaction as the record it numbers, so a rolled-back save never burns a number.
+model Counter {
+  key   String @id // e.g. "PP-2026"
+  value Int
+
+  @@map("counters")
+}
+
+model AuditLog {
+  id        Int      @id @default(autoincrement())
+  userId    Int?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String // CREATE, UPDATE, VOID, CANCEL, STATUS, OVERRIDE, LOGIN, ...
+  entity    String // Order, Payment, Material, ...
+  entityId  String
+  summary   String
+  data      Json?
+  createdAt DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+/// Small uploaded files (job progress photos, expense receipts) stored in the DB so that
+/// the daily database backup covers them too. Images are resized client-side before upload.
+model Attachment {
+  id           Int        @id @default(autoincrement())
+  filename     String
+  mimeType     String
+  size         Int
+  data         Bytes
+  jobId        Int?
+  job          Job?       @relation(fields: [jobId], references: [id])
+  expense      Expense?
+  /// Time-clock selfies (admin-only viewing).
+  timeInEntry  TimeEntry? @relation("TimeInPhoto")
+  timeOutEntry TimeEntry? @relation("TimeOutPhoto")
+  createdById  Int
+  createdBy    User       @relation(fields: [createdById], references: [id])
+  createdAt    DateTime   @default(now())
+
+  @@map("attachments")
+}
+
+// ───────────────────────── Customers & suppliers ─────────────────────────
+
+model Customer {
+  id        Int       @id @default(autoincrement())
+  name      String
+  mobile    String?
+  facebook  String? // Facebook name or profile link
+  email     String?
+  address   String?
+  notes     String?
+  /// The shop's own branch: orders are stock transfers — no prices, no payments, excluded from sales figures.
+  isInternal Boolean  @default(false)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  orders    Order[]
+  payments  Payment[]
+
+  @@index([name])
+  @@map("customers")
+}
+
+model Supplier {
+  id             Int               @id @default(autoincrement())
+  name           String
+  contactPerson  String?
+  mobile         String?
+  email          String?
+  address        String?
+  paymentTerms   String? // e.g. "COD", "15 days"
+  notes          String?
+  active         Boolean           @default(true)
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+  materials      Material[]
+  purchaseOrders PurchaseOrder[]
+  payments       SupplierPayment[]
+
+  @@map("suppliers")
+}
+
+// ───────────────────────── Products & pricing ─────────────────────────
+
+model ProductCategory {
+  id                 Int       @id @default(autoincrement())
+  name               String    @unique
+  /// When true, every order line of this category becomes a Job on the production board.
+  requiresProduction Boolean   @default(true)
+  sortOrder          Int       @default(0)
+  products           Product[]
+
+  @@map("product_categories")
+}
+
+model Product {
+  id          Int              @id @default(autoincrement())
+  categoryId  Int
+  category    ProductCategory  @relation(fields: [categoryId], references: [id])
+  name        String
+  description String?
+  pricingMode PricingMode      @default(FIXED)
+  /// Centavos. FIXED: price per piece. PER_SQFT: price per square foot.
+  basePrice   Int              @default(0)
+  unit        String           @default("pc")
+  active      Boolean          @default(true)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  options     ProductOption[]
+  bom         BillOfMaterial[]
+  orderItems  OrderItem[]
+
+  @@map("products")
+}
+
+model ProductOption {
+  id           Int                  @id @default(autoincrement())
+  productId    Int
+  product      Product              @relation(fields: [productId], references: [id], onDelete: Cascade)
+  name         String // "Cover type", "Size", "Number of leaves", "Add-ons"
+  type         OptionType
+  required     Boolean              @default(false)
+  /// NUMBER options only: centavos per unit (e.g. price per leaf).
+  unitPrice    Int                  @default(0)
+  minValue     Int?
+  maxValue     Int?
+  defaultValue Int?
+  sortOrder    Int                  @default(0)
+  values       ProductOptionValue[]
+  bomLines     BillOfMaterial[]
+
+  @@map("product_options")
+}
+
+model ProductOptionValue {
+  id         Int              @id @default(autoincrement())
+  optionId   Int
+  option     ProductOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  label      String
+  /// Centavos added to the unit price when chosen (can be negative).
+  priceDelta Int              @default(0)
+  sortOrder  Int              @default(0)
+  active     Boolean          @default(true)
+  bomLines   BillOfMaterial[] @relation("BomCondition")
+  bomLines2  BillOfMaterial[] @relation("BomCondition2")
+
+  @@map("product_option_values")
+}
+
+/// Materials consumed per 1 unit of a product. Quantity used for an order line =
+///   quantity × line qty × (area in sq ft if PER_SQFT and not perPiece) × (numeric option value if optionId set)
+/// and the line is only applied when optionValueId is null or that value was chosen.
+model BillOfMaterial {
+  id            Int                 @id @default(autoincrement())
+  productId     Int
+  product       Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  materialId    Int
+  material      Material            @relation(fields: [materialId], references: [id])
+  quantity      Float
+  /// PER_SQFT products only: when true the quantity is per piece, not per sq ft (e.g. 8 eyelets per tarp).
+  perPiece      Boolean             @default(false)
+  optionId      Int?
+  option        ProductOption?      @relation(fields: [optionId], references: [id], onDelete: SetNull)
+  optionValueId Int?
+  optionValue   ProductOptionValue? @relation("BomCondition", fields: [optionValueId], references: [id], onDelete: SetNull)
+  /// Optional second condition: the line applies only when BOTH chosen values are selected (e.g. Size AND Paper).
+  optionValue2Id Int?
+  optionValue2  ProductOptionValue? @relation("BomCondition2", fields: [optionValue2Id], references: [id], onDelete: SetNull)
+  notes         String?
+
+  @@map("bill_of_materials")
+}
+
+// ───────────────────────── Orders & payments ─────────────────────────
+
+model Order {
+  id                   Int           @id @default(autoincrement())
+  orderNo              String        @unique // PP-2026-00123
+  customerId           Int
+  customer             Customer      @relation(fields: [customerId], references: [id])
+  status               OrderStatus   @default(PENDING)
+  paymentStatus        PaymentStatus @default(UNPAID)
+  paymentTerms         PaymentTerms  @default(DOWNPAYMENT)
+  subtotal             Int           @default(0)
+  discount             Int           @default(0)
+  discountReason       String?
+  /// Admin whose password approved the discount.
+  discountApprovedById Int?
+  discountApprovedBy   User?         @relation("DiscountApprovedBy", fields: [discountApprovedById], references: [id])
+  total                Int           @default(0)
+  amountPaid           Int           @default(0)
+  balance              Int           @default(0)
+  targetDate           DateTime?
+  notes                String?
+  cancelledAt          DateTime?
+  cancelReason         String?
+  deliveredAt          DateTime?
+  deliveredOverride    Boolean       @default(false)
+  createdById          Int
+  createdBy            User          @relation("OrderCreatedBy", fields: [createdById], references: [id])
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  items                OrderItem[]
+  payments             Payment[]
+  jobs                 Job[]
+  deliveries           Delivery[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("orders")
+}
+
+model OrderItem {
+  id                  Int             @id @default(autoincrement())
+  orderId             Int
+  order               Order           @relation(fields: [orderId], references: [id])
+  productId           Int
+  product             Product         @relation(fields: [productId], references: [id])
+  description         String // product name snapshot
+  quantity            Int
+  widthFt             Float?
+  heightFt            Float?
+  suggestedUnitPrice  Int // computed from the price list
+  unitPrice           Int // actual (may be overridden)
+  lineTotal           Int
+  priceOverrideReason String?
+  specsNotes          String? // free-text specifications
+  fileSource          FileSource      @default(NONE)
+  fileSourceNote      String?
+  specs               OrderItemSpec[]
+  job                 Job?
+
+  @@map("order_items")
+}
+
+/// Snapshot of the options chosen for a line, so later price-list edits never change old orders.
+model OrderItemSpec {
+  id            Int       @id @default(autoincrement())
+  orderItemId   Int
+  orderItem     OrderItem @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  optionId      Int?
+  optionValueId Int?
+  name          String // "Cover type"
+  value         String // "Leather"
+  numberValue   Float? // for NUMBER options (e.g. 30 leaves)
+  priceEffect   Int       @default(0) // centavos this choice added to the unit price
+
+  @@map("order_item_specs")
+}
+
+model Payment {
+  id               Int             @id @default(autoincrement())
+  receiptNo        String          @unique // AR-2026-00045
+  orderId          Int
+  order            Order           @relation(fields: [orderId], references: [id])
+  customerId       Int
+  customer         Customer        @relation(fields: [customerId], references: [id])
+  amount           Int
+  method           PaymentMethod
+  reference        String? // GCash ref no., bank ref, etc.
+  /// The shop's GCash / Maya / bank account that received the money (null for cash).
+  accountId        Int?
+  account          PaymentAccount? @relation(fields: [accountId], references: [id])
+  notes            String?
+  paidAt           DateTime        @default(now())
+  voided           Boolean         @default(false)
+  voidReason       String?
+  voidedAt         DateTime?
+  voidedById       Int?
+  voidedBy         User?           @relation("PaymentVoidedBy", fields: [voidedById], references: [id])
+  /// Owner/admin whose approval PIN authorised the void.
+  voidApprovedById Int?
+  voidApprovedBy   User?           @relation("PaymentVoidApprovedBy", fields: [voidApprovedById], references: [id])
+  receivedById     Int
+  receivedBy       User            @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  createdAt        DateTime        @default(now())
+
+  @@index([orderId])
+  @@index([paidAt])
+  @@map("payments")
+}
+
+// ───────────────────────── Production ─────────────────────────
+
+model Job {
+  id                Int             @id @default(autoincrement())
+  orderId           Int
+  order             Order           @relation(fields: [orderId], references: [id])
+  orderItemId       Int             @unique
+  orderItem         OrderItem       @relation(fields: [orderItemId], references: [id])
+  status            JobStatus       @default(PENDING)
+  assignedToId      Int?
+  assignedTo        User?           @relation("JobAssignedTo", fields: [assignedToId], references: [id])
+  /// Who delegated the job to that worker, and when (null = never assigned).
+  assignedById      Int?
+  assignedBy        User?           @relation("JobAssignedBy", fields: [assignedById], references: [id])
+  assignedAt        DateTime?
+  dueDate           DateTime?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  materialsDeducted Boolean         @default(false)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+  logs              JobStatusLog[]
+  attachments       Attachment[]
+  stockMovements    StockMovement[]
+
+  @@index([status])
+  @@index([assignedToId])
+  @@map("jobs")
+}
+
+/// Status changes AND progress notes (fromStatus/toStatus null = note only).
+model JobStatusLog {
+  id         Int        @id @default(autoincrement())
+  jobId      Int
+  job        Job        @relation(fields: [jobId], references: [id])
+  fromStatus JobStatus?
+  toStatus   JobStatus?
+  note       String?
+  userId     Int
+  user       User       @relation(fields: [userId], references: [id])
+  createdAt  DateTime   @default(now())
+
+  @@index([jobId])
+  @@map("job_status_logs")
+}
+
+// ───────────────────────── Inventory ─────────────────────────
+
+model Material {
+  id             Int                  @id @default(autoincrement())
+  name           String
+  sku            String?
+  level          MaterialLevel
+  /// Product line this material is for; null = not yet classified.
+  usedFor        MaterialUse?
+  /// Photo paper rolls (unit = m): paper width and length of one roll, so metres on hand can be shown as rolls.
+  rollWidthCm    Float?
+  rollLengthM    Float?
+  unit           String // sheet, pc, roll, ream, ml, bottle, ft
+  stock          Float                @default(0)
+  reorderLevel   Float                @default(0)
+  /// Centavos per unit, weighted average of stock-ins (may hold fractions of a centavo, e.g. roll paper per cm).
+  unitCost       Float                @default(0)
+  supplierId     Int?
+  supplier       Supplier?            @relation(fields: [supplierId], references: [id])
+  notes          String?
+  active         Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  movements      StockMovement[]
+  bomLines       BillOfMaterial[]
+  poItems        PurchaseOrderItem[]
+  conversionsIn  MaterialConversion[] @relation("ConversionInput")
+  conversionsOut MaterialConversion[] @relation("ConversionOutput")
+
+  @@map("materials")
+}
+
+model StockMovement {
+  id              Int                 @id @default(autoincrement())
+  materialId      Int
+  material        Material            @relation(fields: [materialId], references: [id])
+  type            MovementType
+  quantity        Float // signed: + in, − out
+  unitCost        Float // centavos per unit at the time of the movement
+  balanceAfter    Float
+  notes           String?
+  jobId           Int?
+  job             Job?                @relation(fields: [jobId], references: [id])
+  purchaseOrderId Int?
+  purchaseOrder   PurchaseOrder?      @relation(fields: [purchaseOrderId], references: [id])
+  conversionId    Int?
+  conversion      MaterialConversion? @relation(fields: [conversionId], references: [id])
+  /// Stock-out only: the production worker who received the material.
+  releasedToId    Int?
+  releasedTo      User?               @relation("StockReleasedTo", fields: [releasedToId], references: [id])
+  /// Job deductions only: set when the materials were put back in stock because the job / order was cancelled.
+  returnedAt      DateTime?
+  userId          Int
+  user            User                @relation("StockMovedBy", fields: [userId], references: [id])
+  createdAt       DateTime            @default(now())
+
+  @@index([materialId, createdAt])
+  @@map("stock_movements")
+}
+
+/// e.g. 1 full PVC sheet 4x8 → 24 pcs 12x12 + 0.5 waste
+model MaterialConversion {
+  id               Int             @id @default(autoincrement())
+  inputMaterialId  Int
+  inputMaterial    Material        @relation("ConversionInput", fields: [inputMaterialId], references: [id])
+  inputQty         Float
+  outputMaterialId Int
+  outputMaterial   Material        @relation("ConversionOutput", fields: [outputMaterialId], references: [id])
+  outputQty        Float
+  wasteQty         Float           @default(0) // in output units, informational
+  notes            String?
+  userId           Int
+  user             User            @relation(fields: [userId], references: [id])
+  createdAt        DateTime        @default(now())
+  movements        StockMovement[]
+
+  @@map("material_conversions")
+}
+
+// ───────────────────────── Purchasing ─────────────────────────
+
+model PurchaseOrder {
+  id           Int                 @id @default(autoincrement())
+  poNo         String              @unique // PO-2026-00007
+  supplierId   Int
+  supplier     Supplier            @relation(fields: [supplierId], references: [id])
+  status       POStatus            @default(DRAFT)
+  orderDate    DateTime            @default(now())
+  expectedDate DateTime?
+  notes        String?
+  total        Int                 @default(0)
+  cancelReason String?
+  createdById  Int
+  createdBy    User                @relation(fields: [createdById], references: [id])
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  items        PurchaseOrderItem[]
+  payments     SupplierPayment[]
+  movements    StockMovement[]
+
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id              Int           @id @default(autoincrement())
+  purchaseOrderId Int
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  materialId      Int
+  material        Material      @relation(fields: [materialId], references: [id])
+  quantity        Float
+  receivedQty     Float         @default(0)
+  unitCost        Int
+  lineTotal       Int
+
+  @@map("purchase_order_items")
+}
+
+model SupplierPayment {
+  id              Int            @id @default(autoincrement())
+  supplierId      Int
+  supplier        Supplier       @relation(fields: [supplierId], references: [id])
+  purchaseOrderId Int?
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  amount          Int
+  method          PaymentMethod
+  reference       String?
+  notes           String?
+  paidAt          DateTime       @default(now())
+  voided          Boolean        @default(false)
+  voidReason      String?
+  createdById     Int
+  createdBy       User           @relation(fields: [createdById], references: [id])
+  createdAt       DateTime       @default(now())
+
+  @@map("supplier_payments")
+}
+
+// ───────────────────────── Expenses ─────────────────────────
+
+model ExpenseCategory {
+  id       Int       @id @default(autoincrement())
+  name     String    @unique
+  active   Boolean   @default(true)
+  expenses Expense[]
+
+  @@map("expense_categories")
+}
+
+model Expense {
+  id           Int             @id @default(autoincrement())
+  date         DateTime
+  categoryId   Int
+  category     ExpenseCategory @relation(fields: [categoryId], references: [id])
+  /// Required when the category is "Others": what the expense actually was.
+  otherDetail  String?
+  amount       Int
+  paidVia      PaymentMethod
+  notes        String?
+  attachmentId Int?            @unique
+  attachment   Attachment?     @relation(fields: [attachmentId], references: [id])
+  voided       Boolean         @default(false)
+  voidReason   String?
+  createdById  Int
+  createdBy    User            @relation(fields: [createdById], references: [id])
+  createdAt    DateTime        @default(now())
+
+  @@index([date])
+  @@map("expenses")
+}
+
+// ───────────────────────── Delivery ─────────────────────────
+
+model Delivery {
+  id            Int            @id @default(autoincrement())
+  orderId       Int
+  order         Order          @relation(fields: [orderId], references: [id])
+  method        DeliveryMethod
+  address       String?
+  recipient     String?
+  contactNo     String?
+  rider         String?
+  trackingNo    String?
+  fee           Int            @default(0) // centavos, informational (not added to order total)
+  scheduledDate DateTime?
+  deliveredAt   DateTime?
+  status        DeliveryStatus @default(SCHEDULED)
+  notes         String?
+  createdById   Int
+  createdBy     User           @relation(fields: [createdById], references: [id])
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([orderId])
+  @@map("deliveries")
+}
+
+// ───────────────────────── HR: employees, timekeeping, payroll ─────────────────────────
+// Access: ADMIN only, except an employee linked to a login may view their OWN time records
+// and finalized payslips (/me). Incidents are never shown to employees.
+
+enum EmploymentStatus {
+  ACTIVE
+  ON_LEAVE
+  RESIGNED
+  TERMINATED
+}
+
+enum PayType {
+  DAILY // rate = daily rate
+  MONTHLY // rate = monthly salary
+}
+
+enum PayFrequency {
+  WEEKLY
+  SEMI_MONTHLY
+}
+
+enum DayType {
+  REGULAR
+  REST_DAY
+  SPECIAL_HOLIDAY
+  REGULAR_HOLIDAY
+  PAID_LEAVE // no time in/out; paid as a full regular day
+}
+
+enum TimeSource {
+  CLOCK // employee used the time clock (PIN)
+  MANUAL // added / corrected by admin
+}
+
+enum DeductionSchedule {
+  EVERY_PAYROLL
+  ONCE_A_MONTH // deducted in the first payroll run of the month
+}
+
+enum HolidayType {
+  REGULAR
+  SPECIAL
+}
+
+enum PayrollStatus {
+  DRAFT
+  FINALIZED
+  PAID
+  VOID
+}
+
+enum PayslipLineKind {
+  EARNING
+  DEDUCTION
+}
+
+enum CashAdvanceStatus {
+  OPEN
+  PAID
+  VOID
+}
+
+enum IncidentType {
+  INCIDENT
+  VIOLATION
+  WARNING
+  OTHER
+}
+
+enum IncidentSeverity {
+  MINOR
+  MAJOR
+  GRAVE
+}
+
+model Employee {
+  id               Int              @id @default(autoincrement())
+  employeeNo       String           @unique // EMP-0001
+  firstName        String
+  lastName         String
+  middleName       String?
+  nickname         String?
+  position         String
+  mobile           String?
+  email            String?
+  address          String?
+  birthDate        DateTime?
+  hireDate         DateTime
+  status           EmploymentStatus @default(ACTIVE)
+  endDate          DateTime?
+  payType          PayType          @default(DAILY)
+  /// Centavos: daily rate (DAILY) or monthly salary (MONTHLY).
+  rate             Int
+  payFrequency     PayFrequency     @default(SEMI_MONTHLY)
+  /// Work schedule, Manila time, "HH:MM".
+  shiftStart       String           @default("08:00")
+  shiftEnd         String           @default("17:00")
+  breakMinutes     Int              @default(60)
+  /// ISO weekdays worked, 1 = Mon … 7 = Sun, e.g. "1,2,3,4,5,6".
+  workDays         String           @default("1,2,3,4,5,6")
+  sssNo            String?
+  philhealthNo     String?
+  pagibigNo        String?
+  tin              String?
+  emergencyContact String?
+  emergencyPhone   String?
+  /// bcrypt hash of the 4–6 digit time-clock PIN.
+  pinHash          String?
+  pinFailedCount   Int              @default(0)
+  pinLockedUntil   DateTime?
+  /// Optional login for self-service (own DTR & payslips).
+  userId           Int?             @unique
+  user             User?            @relation("EmployeeUser", fields: [userId], references: [id])
+  notes            String?
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  timeEntries  TimeEntry[]
+  deductions   RecurringDeduction[]
+  cashAdvances CashAdvance[]
+  payslips     Payslip[]
+  incidents    Incident[]
+
+  @@map("employees")
+}
+
+/// One row per employee per day (daily time record). Computed minutes are stored so
+/// payroll and reports don't have to recompute them.
+model TimeEntry {
+  id               Int         @id @default(autoincrement())
+  employeeId       Int
+  employee         Employee    @relation(fields: [employeeId], references: [id])
+  workDate         DateTime // Manila midnight of the work day
+  timeIn           DateTime?
+  timeOut          DateTime?
+  breakMinutes     Int         @default(60)
+  dayType          DayType     @default(REGULAR)
+  source           TimeSource  @default(CLOCK)
+  /// Overtime is only paid once approved by the admin.
+  otApproved       Boolean     @default(false)
+  regularMinutes   Int         @default(0)
+  lateMinutes      Int         @default(0)
+  undertimeMinutes Int         @default(0)
+  overtimeMinutes  Int         @default(0)
+  /// Selfies taken by the time clock at the moment of each punch (admin-only).
+  timeInPhotoId    Int?        @unique
+  timeInPhoto      Attachment? @relation("TimeInPhoto", fields: [timeInPhotoId], references: [id])
+  timeOutPhotoId   Int?        @unique
+  timeOutPhoto     Attachment? @relation("TimeOutPhoto", fields: [timeOutPhotoId], references: [id])
+  /// GPS fix from the device at the moment of each punch (admin-only). Accuracy in metres.
+  timeInLat        Float?
+  timeInLng        Float?
+  timeInAccuracy   Float?
+  timeOutLat       Float?
+  timeOutLng       Float?
+  timeOutAccuracy  Float?
+  /// The login that was active on the device at each punch, and a random per-device id (cookie) — used to flag
+  /// punches made from another employee's login or from one phone for several people (buddy punching).
+  timeInByUserId   Int?
+  timeOutByUserId  Int?
+  timeInDeviceId   String?     @db.VarChar(40)
+  timeOutDeviceId  String?     @db.VarChar(40)
+  /// Buddy-punching flag reviewed by an admin: when, by whom, and why it is OK.
+  flagsClearedAt   DateTime?
+  flagsClearedById Int?
+  flagsClearNote   String?     @db.VarChar(300)
+  notes            String?
+  createdById      Int?
+  updatedById      Int?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@unique([employeeId, workDate])
+  @@index([workDate])
+  @@map("time_entries")
+}
+
+model Holiday {
+  id   Int         @id @default(autoincrement())
+  date DateTime    @unique // Manila midnight
+  name String
+  type HolidayType
+
+  @@map("holidays")
+}
+
+/// Fixed deductions per employee, e.g. SSS. Add PhilHealth / Pag-IBIG / tax later the same way.
+model RecurringDeduction {
+  id         Int               @id @default(autoincrement())
+  employeeId Int
+  employee   Employee          @relation(fields: [employeeId], references: [id])
+  name       String // "SSS"
+  amount     Int // centavos per deduction
+  schedule   DeductionSchedule @default(EVERY_PAYROLL)
+  active     Boolean           @default(true)
+  notes      String?
+  createdAt  DateTime          @default(now())
+  lines      PayslipLine[]
+
+  @@map("recurring_deductions")
+}
+
+/// Cash advance ("bale"), repaid by automatic payroll deductions.
+model CashAdvance {
+  id          Int               @id @default(autoincrement())
+  employeeId  Int
+  employee    Employee          @relation(fields: [employeeId], references: [id])
+  date        DateTime
+  amount      Int
+  installment Int // centavos deducted per payroll
+  balance     Int
+  reason      String?
+  status      CashAdvanceStatus @default(OPEN)
+  voidReason  String?
+  createdById Int
+  createdAt   DateTime          @default(now())
+  lines       PayslipLine[]
+
+  @@map("cash_advances")
+}
+
+model PayrollRun {
+  id              Int           @id @default(autoincrement())
+  runNo           String        @unique // PR-2026-00004
+  frequency       PayFrequency
+  periodStart     DateTime
+  periodEnd       DateTime
+  payDate         DateTime
+  status          PayrollStatus @default(DRAFT)
+  notes           String?
+  totalGross      Int           @default(0)
+  totalDeductions Int           @default(0)
+  totalNet        Int           @default(0)
+  finalizedAt     DateTime?
+  finalizedById   Int?
+  paidAt          DateTime?
+  /// Expense recorded (category "Salaries") when the run is marked paid.
+  expenseId       Int?
+  voidReason      String?
+  createdById     Int
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  payslips        Payslip[]
+
+  @@map("payroll_runs")
+}
+
+model Payslip {
+  id               Int           @id @default(autoincrement())
+  runId            Int
+  run              PayrollRun    @relation(fields: [runId], references: [id], onDelete: Cascade)
+  employeeId       Int
+  employee         Employee      @relation(fields: [employeeId], references: [id])
+  payType          PayType
+  rate             Int // snapshot
+  dailyRate        Int // snapshot (computed for MONTHLY)
+  daysWorked       Float         @default(0)
+  regularHours     Float         @default(0)
+  overtimeHours    Float         @default(0)
+  lateMinutes      Int           @default(0)
+  undertimeMinutes Int           @default(0)
+  absentDays       Float         @default(0)
+  gross            Int           @default(0)
+  deductions       Int           @default(0)
+  net              Int           @default(0)
+  notes            String?
+  lines            PayslipLine[]
+
+  @@unique([runId, employeeId])
+  @@map("payslips")
+}
+
+model PayslipLine {
+  id                   Int                 @id @default(autoincrement())
+  payslipId            Int
+  payslip              Payslip             @relation(fields: [payslipId], references: [id], onDelete: Cascade)
+  kind                 PayslipLineKind
+  /// BASIC, ABSENCES, LATE_UNDERTIME, OVERTIME, REST_DAY, HOLIDAY, LEAVE, RECURRING, CASH_ADVANCE, MANUAL
+  code                 String
+  label                String
+  amount               Int // centavos, always positive; kind says + or −
+  quantity             Float? // days / hours / minutes the amount is based on
+  manual               Boolean             @default(false) // added by admin; kept when the draft is recalculated
+  recurringDeductionId Int?
+  recurringDeduction   RecurringDeduction? @relation(fields: [recurringDeductionId], references: [id])
+  cashAdvanceId        Int?
+  cashAdvance          CashAdvance?        @relation(fields: [cashAdvanceId], references: [id])
+
+  @@map("payslip_lines")
+}
+
+/// Admin-only HR notes. Never exposed to employees (not even their own).
+model Incident {
+  id          Int              @id @default(autoincrement())
+  employeeId  Int
+  employee    Employee         @relation(fields: [employeeId], references: [id])
+  date        DateTime
+  type        IncidentType
+  severity    IncidentSeverity @default(MINOR)
+  title       String
+  description String
+  actionTaken String?
+  createdById Int
+  createdBy   User             @relation("IncidentCreatedBy", fields: [createdById], references: [id])
+  updatedById Int?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  @@index([employeeId, date])
+  @@map("incidents")
+}
+
+/// The shop's receiving accounts (e.g. "Jc's GCash 0917…", "BDO Savings …1234").
+/// Payments by GCash / Maya / bank transfer record which account the customer sent the money to.
+model PaymentAccount {
+  id            Int           @id @default(autoincrement())
+  method        PaymentMethod // GCASH, MAYA, BANK_TRANSFER or OTHER
+  label         String // short name shown at the counter, e.g. "Jc's GCash"
+  accountName   String? // name on the account
+  accountNumber String? // mobile no. / account no.
+  active        Boolean       @default(true)
+  sortOrder     Int           @default(0)
+  createdAt     DateTime      @default(now())
+  payments      Payment[]
+
+  @@map("payment_accounts")
+}
+
+/// Access roles. The Admin (owner) role is locked to full access (isAdmin); other roles are
+/// sets of module permissions (see src/lib/permissions.ts) that the owner can create and edit.
+model AccessRole {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  description String?
+  permissions String[]
+  isAdmin     Boolean  @default(false)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  users       User[]
+
+  @@map("roles")
+}

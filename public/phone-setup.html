@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Paper & Pixels — phone setup</title>
+<style>body{font-family:-apple-system,system-ui,sans-serif;max-width:560px;margin:0 auto;padding:20px;color:#0f172a;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:22px}ol{padding-left:20px}li{margin:6px 0}a.btn{display:inline-block;background:#1452d9;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none;font-weight:600}code{background:#f1f5f9;padding:2px 6px;border-radius:4px}.note{background:#fef3c7;border:1px solid #fcd34d;padding:10px 12px;border-radius:6px;font-size:14px}</style></head>
+<body>
+<h1>Paper &amp; Pixels — set up this phone (one time)</h1>
+<p>So the <b>Time Clock camera and location</b> work on this phone, install the shop's certificate once. It only applies to the shop app, nothing else.</p>
+<p><a class="btn" href="/ca.crt" download="Paper-and-Pixels-CA.crt">1. Download the certificate</a></p>
+<h2>iPhone / iPad</h2>
+<ol>
+<li>Tap the button above → <b>Allow</b> → "Profile Downloaded".</li>
+<li>Open <b>Settings</b> → <b>Profile Downloaded</b> (top) → <b>Install</b> → enter passcode → Install.</li>
+<li>Then <b>Settings → General → About → Certificate Trust Settings</b> → turn <b>ON</b> "Paper &amp; Pixels Shop CA" → Continue.</li>
+</ol>
+<h2>Android</h2>
+<ol>
+<li>Tap the button above (the file saves to Downloads).</li>
+<li><b>Settings → Security → More security / Encryption &amp; credentials → Install a certificate → CA certificate</b> → Install anyway → choose the downloaded file.</li>
+</ol>
+<h2>2. Open the app</h2>
+<p>Go to <b id="https-link"><a href="#">https://…:3443</a></b> and log in. Add it to your home screen (Share → Add to Home Screen). When the Time Clock asks, tap <b>Allow</b> for camera and location.</p>
+<p class="note">If the browser still warns about the certificate, step 3 (iPhone) or the CA install (Android) was skipped.</p>
+<script>var h=location.hostname;var u='https://'+h+':3443/';var a=document.querySelector('#https-link a');a.href=u;a.textContent=u;</script>
+</body></html>
