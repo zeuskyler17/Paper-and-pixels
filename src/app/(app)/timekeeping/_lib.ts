@@ -32,7 +32,7 @@ export async function lockReason(db: Db, employeeId: number, dateStr: string): P
 }
 
 export type DtrRow = {
-  date: string; weekday: string; entry: TimeEntry | null; holiday: { name: string; type: HolidayType } | null;
+  date: string; weekday: string; entry: (TimeEntry & { breaks: { startAt: Date; endAt: Date | null }[] }) | null; holiday: { name: string; type: HolidayType } | null;
   dayType: TimeEntry['dayType']; status: DtrStatus; locked: boolean;
 };
 
@@ -47,7 +47,7 @@ export async function buildDtr(emp: Employee, from: string, to: string) {
   const end = parseDateInput(to)!;
   const endEx = new Date(end.getTime() + 86_400_000);
   const [entries, holidays, locks] = await Promise.all([
-    prisma.timeEntry.findMany({ where: { employeeId: emp.id, workDate: { gte: start, lt: endEx } } }),
+    prisma.timeEntry.findMany({ where: { employeeId: emp.id, workDate: { gte: start, lt: endEx } }, include: { breaks: { orderBy: { startAt: 'asc' }, select: { startAt: true, endAt: true } } } }),
     prisma.holiday.findMany({ where: { date: { gte: start, lt: endEx } } }),
     lockedPeriods(prisma, emp.id, from, to),
   ]);

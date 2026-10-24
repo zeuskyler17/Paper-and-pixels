@@ -92,8 +92,8 @@ export async function GET(req: Request, { params }: { params: Promise<{ report: 
   const url = new URL(req.url);
   const p = normalizeParams({ from: url.searchParams.get('from'), to: url.searchParams.get('to'), group: url.searchParams.get('group') });
   const format = url.searchParams.get('format') === 'xlsx' ? 'xlsx' : 'csv';
-  const data = await buildReport(report, p);
-  const base = `${report}_${report === 'receivables' ? `as-of-${todayManila()}` : `${p.from}_to_${p.to}`}`;
+  const data = await buildReport(report, p, user.isAdmin);
+  const base = `${report}_${report === 'receivables' ? `as-of-${todayManila()}` : report === 'daily' ? p.to : `${p.from}_to_${p.to}`}`;
 
   if (format === 'csv') {
     return new NextResponse(toCsv(data), {

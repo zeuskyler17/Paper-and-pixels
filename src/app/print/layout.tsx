@@ -6,7 +6,7 @@ export default async function PrintLayout({ children }: { children: React.ReactN
   await requireUser();
   return (
     <div className="min-h-screen bg-slate-200 py-6 print:bg-white print:py-0">
-      <div className="no-print mx-auto mb-4 flex max-w-[210mm] justify-between gap-2 px-2">
+      <div className="no-print mx-auto mb-4 flex max-w-[8.5in] justify-between gap-2 px-2">
         <BackButton />
         <PrintButton />
       </div>

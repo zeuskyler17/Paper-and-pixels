@@ -18,6 +18,8 @@ export const PERMISSIONS = [
   { key: 'expenses', group: 'Finance', label: 'Expenses (record)', hint: 'Add expenses and view the expense list' },
   { key: 'expenses_manage', group: 'Finance', label: 'Void expenses & categories', hint: 'Void expenses and edit expense categories' },
   { key: 'reports', group: 'Reports', label: 'All reports & Excel export', hint: 'Every report: sales, payments, receivables, expenses, profit, inventory, worker productivity' },
+  { key: 'reports_daily', group: 'Reports', label: 'Daily report', hint: 'One day: sales collected less expenses, payments, receiving accounts, products and items sold' },
+  { key: 'reports_sales', group: 'Reports', label: 'Sales reports', hint: 'Sales summary and sales by product category (no profit, expenses or receivables)' },
   { key: 'reports_production', group: 'Reports', label: 'Production reports', hint: 'Worker productivity: jobs completed, turnaround, work in process, overdue jobs' },
   { key: 'reports_inventory', group: 'Reports', label: 'Inventory reports', hint: 'Inventory valuation & movement: stock on hand, value, stock in / out in the period' },
   { key: 'hr', group: 'People', label: 'Employees, timekeeping & payroll', hint: 'Employee records, time records & selfies, payroll, incidents' },
@@ -48,14 +50,15 @@ export function can(user: Access | null | undefined, need: Need | Need[]): boole
 /** Where a user lands after login / when a page is not allowed. */
 export function homeFor(user: Access): string {
   if (can(user, 'dashboard')) return '/dashboard';
-  if (can(user, ['jobs_manage', 'jobs_own'])) return '/jobs';
+  if (can(user, 'jobs_manage')) return '/jobs';
   if (can(user, 'orders')) return '/orders';
   if (can(user, 'inventory')) return '/inventory/out';
+  if (can(user, 'jobs_own')) return '/jobs';
   if (can(user, 'customers')) return '/customers';
   if (can(user, 'expenses')) return '/expenses';
   if (can(user, 'deliveries')) return '/deliveries';
   if (can(user, 'purchasing')) return '/purchase-orders';
-  if (can(user, ['reports', 'reports_production', 'reports_inventory'])) return '/reports';
+  if (can(user, ['reports', 'reports_daily', 'reports_sales', 'reports_production', 'reports_inventory'])) return '/reports';
   if (can(user, 'hr')) return '/employees';
   return '/clock';
 }
@@ -64,16 +67,16 @@ export function homeFor(user: Access): string {
 export const PRESET_ROLES: { name: string; description: string; legacy: 'STAFF' | 'WORKER' | 'INVENTORY'; permissions: Permission[] }[] = [
   {
     name: 'Cashier / Staff', legacy: 'STAFF', description: 'Counter staff: orders, payments, customers, production board, deliveries, inventory, purchasing, expenses.',
-    permissions: ['dashboard', 'orders', 'customers', 'jobs_manage', 'deliveries', 'products_view', 'inventory', 'purchasing', 'expenses'],
+    permissions: ['dashboard', 'orders', 'customers', 'jobs_manage', 'deliveries', 'products_view', 'inventory', 'purchasing', 'expenses', 'reports_daily'],
   },
   { name: 'Production worker', legacy: 'WORKER', description: 'Sees and works on their own assigned jobs.', permissions: ['jobs_own'] },
-  { name: 'Inventory personnel', legacy: 'INVENTORY', description: 'Stockroom: materials, stock out, counts and conversions.', permissions: ['inventory'] },
+  { name: 'Inventory personnel', legacy: 'INVENTORY', description: 'Stockroom: materials, stock out, counts and conversions. Can also be assigned production jobs.', permissions: ['inventory', 'jobs_own'] },
 ];
 
 /** Extra ready-made roles (not tied to an old enum value). */
 export const EXTRA_PRESET_ROLES: { name: string; description: string; permissions: Permission[] }[] = [
-  { name: 'Production Supervisor', description: 'Runs the production floor: all jobs, assigning workers, deliveries, plus production reports.', permissions: ['jobs_manage', 'deliveries', 'products_view', 'reports_production'] },
-  { name: 'Inventory Supervisor', description: 'Runs the stockroom: inventory, stock out, purchasing, plus inventory reports.', permissions: ['inventory', 'purchasing', 'reports_inventory'] },
+  { name: 'Production Supervisor', description: 'Runs the production floor: all jobs, assigning workers, deliveries, plus production reports.', permissions: ['jobs_manage', 'jobs_own', 'deliveries', 'products_view', 'reports_production'] },
+  { name: 'Inventory Supervisor', description: 'Runs the stockroom: inventory, stock out, purchasing, plus inventory reports.', permissions: ['inventory', 'purchasing', 'reports_inventory', 'jobs_own'] },
 ];
 
 /** Prisma filter: active users who can be assigned production jobs ("My jobs" permission, not Admin). */

@@ -72,7 +72,48 @@ export function fmtMinutes(min: number): string {
   return h ? (m ? `${h}h ${m}m` : `${h}h`) : `${m}m`;
 }
 
-export type EntryInput = { workDate: Date; timeIn: Date | null; timeOut: Date | null; breakMinutes: number; dayType: DayType };
+export type EntryInput = { workDate: Date; timeIn: Date | null; timeOut: Date | null; breakMinutes: number; dayType: DayType; overbreakMinutes?: number };
+
+/** A break slot of the shop's break schedule, in minutes after midnight (Manila). */
+export type BreakSlot = { start: number; end: number };
+
+/** "10:00-10:15, 12:00-13:00, 15:00-15:15" -> slots; invalid parts are ignored. */
+export function parseBreakSchedule(text: string | null | undefined): BreakSlot[] {
+  return (text ?? '').split(/[,;\n]+/).map((p) => {
+    const m = /^\s*(\d{1,2}:\d{2})\s*[-–to]+\s*(\d{1,2}:\d{2})\s*$/.exec(p);
+    if (!m) return null;
+    const start = hhmmToMinutes(m[1]), end = hhmmToMinutes(m[2]);
+    return Number.isFinite(start) && Number.isFinite(end) && end > start ? { start, end } : null;
+  }).filter((x): x is BreakSlot => x !== null).sort((a, b) => a.start - b.start);
+}
+
+export const fmtSlot = (s: BreakSlot) => {
+  const t = (m: number) => { const h = Math.floor(m / 60), mm = m % 60, h12 = ((h + 11) % 12) + 1; return `${h12}:${String(mm).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`; };
+  return `${t(s.start)}–${t(s.end)}`;
+};
+
+/**
+ * Minutes taken over the allowed breaks. Each break is matched to the nearest slot of the break schedule
+ * (by its start time) and the minutes beyond that slot's length are over-break; several breaks in one slot add up.
+ * Without a schedule, the total break time is compared with the employee's break allowance.
+ * Open breaks count up to `until` (the time out), or are skipped when the day is still running.
+ */
+export function overbreakMinutes(workDate: Date, breaks: { startAt: Date; endAt: Date | null }[], slots: BreakSlot[], allowanceMinutes: number, until?: Date | null): number {
+  const done = breaks.map((b) => ({ start: b.startAt, end: b.endAt ?? until ?? null })).filter((b): b is { start: Date; end: Date } => !!b.end && b.end > b.start);
+  if (done.length === 0) return 0;
+  const mins = (b: { start: Date; end: Date }) => Math.round((b.end.getTime() - b.start.getTime()) / MIN);
+  if (slots.length === 0) return Math.max(0, done.reduce((n, b) => n + mins(b), 0) - allowanceMinutes);
+  const used = new Map<number, number>();
+  for (const b of done) {
+    const at = Math.round((b.start.getTime() - workDate.getTime()) / MIN);
+    let best = 0, dist = Infinity;
+    slots.forEach((s, i) => { const d = at < s.start ? s.start - at : at > s.end ? at - s.end : 0; if (d < dist) { dist = d; best = i; } });
+    used.set(best, (used.get(best) ?? 0) + mins(b));
+  }
+  let over = 0;
+  for (const [i, m] of used) over += Math.max(0, m - (slots[i].end - slots[i].start));
+  return over;
+}
 export type EntryMinutes = { regularMinutes: number; lateMinutes: number; undertimeMinutes: number; overtimeMinutes: number };
 
 /**
@@ -83,6 +124,8 @@ export type EntryMinutes = { regularMinutes: number; lateMinutes: number; undert
  *  - PAID_LEAVE: a full scheduled day, no times needed.
  *  - Incomplete (missing time in or out): 0 regular minutes until the admin fixes it.
  * The break is only deducted when at least 5 hours were worked.
+ * Over-break (minutes beyond the allowed breaks, from the time-clock break punches) is not paid: it is taken off
+ * the regular minutes and added to undertime.
  */
 export function computeEntry(s: Schedule, e: EntryInput, graceMinutes = 0): EntryMinutes {
   const sched = scheduledMinutes(s);
@@ -97,9 +140,10 @@ export function computeEntry(s: Schedule, e: EntryInput, graceMinutes = 0): Entr
   }
   const brk = (worked: number) => (worked >= 300 ? e.breakMinutes || 0 : 0);
 
+  const over = Math.max(0, e.overbreakMinutes ?? 0);
   if (e.dayType !== 'REGULAR') {
     const span = Math.round((e.timeOut.getTime() - e.timeIn.getTime()) / MIN);
-    const worked = Math.max(0, span - brk(span));
+    const worked = Math.max(0, span - brk(span) - over);
     return { ...zero, regularMinutes: Math.min(worked, sched), overtimeMinutes: Math.max(0, worked - sched) };
   }
 
@@ -117,6 +161,10 @@ export function computeEntry(s: Schedule, e: EntryInput, graceMinutes = 0): Entr
   const regular = Math.min(sched, Math.max(0, within - brk(within)));
   // Undertime = scheduled minutes not worked other than lateness (so an unworked lunch break isn't counted).
   const undertime = e.timeOut < end ? Math.max(0, sched - regular - late) : 0;
+  if (over > 0) {
+    const cut = Math.min(over, regular);
+    return { regularMinutes: regular - cut, lateMinutes: late, undertimeMinutes: undertime + cut, overtimeMinutes: overtime };
+  }
   return { regularMinutes: regular, lateMinutes: late, undertimeMinutes: undertime, overtimeMinutes: overtime };
 }
 

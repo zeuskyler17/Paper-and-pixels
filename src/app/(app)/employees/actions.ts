@@ -76,6 +76,9 @@ async function readEmployee(fd: FormData, tx: Tx, selfId: number | null) {
   if (span <= 0) span += 24 * 60;
   if (span - breakMinutes < 60) throw new Error('The break is too long for this shift (at least 1 hour of work is needed).');
 
+  const lateGraceMinutes = optInt(fd, 'lateGraceMinutes');
+  if (lateGraceMinutes !== null && (!Number.isInteger(lateGraceMinutes) || lateGraceMinutes < 0 || lateGraceMinutes > 120)) throw new Error('Late grace must be 0–120 minutes, or empty for the shop default.');
+
   const days = [...new Set(fd.getAll('workDays').map((v) => Number(v)))].filter((d) => d >= 1 && d <= 7).sort((a, b) => a - b);
   if (days.length === 0) throw new Error('Pick at least one work day.');
   const workDays = days.join(',');
@@ -96,7 +99,7 @@ async function readEmployee(fd: FormData, tx: Tx, selfId: number | null) {
   return {
     firstName, lastName, middleName: optStr(fd, 'middleName'), nickname: optStr(fd, 'nickname'), position,
     mobile: optStr(fd, 'mobile'), email, address: optStr(fd, 'address'), birthDate, hireDate, status, endDate,
-    payType, rate, payFrequency, shiftStart, shiftEnd, breakMinutes, workDays,
+    payType, rate, payFrequency, shiftStart, shiftEnd, breakMinutes, workDays, lateGraceMinutes,
     sssNo: optStr(fd, 'sssNo'), philhealthNo: optStr(fd, 'philhealthNo'), pagibigNo: optStr(fd, 'pagibigNo'), tin: optStr(fd, 'tin'),
     emergencyContact: optStr(fd, 'emergencyContact'), emergencyPhone: optStr(fd, 'emergencyPhone'),
     notes: optStr(fd, 'notes'), userId,
@@ -153,7 +156,7 @@ export async function updateEmployee(id: number, _prev: ActionState, fd: FormDat
       const { pinHash, ...before } = await tx.employee.findUniqueOrThrow({ where: { id } });
       const data = await readEmployee(fd, tx, id);
       const scheduleChanged = before.shiftStart !== data.shiftStart || before.shiftEnd !== data.shiftEnd
-        || before.breakMinutes !== data.breakMinutes || before.workDays !== data.workDays;
+        || before.breakMinutes !== data.breakMinutes || before.workDays !== data.workDays || before.lateGraceMinutes !== data.lateGraceMinutes;
       const updated = await tx.employee.update({ where: { id }, data });
 
       let count = 0;

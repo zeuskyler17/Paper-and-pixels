@@ -3,9 +3,11 @@ import { prisma } from '@/lib/db';
 import { requireUser } from '@/lib/auth';
 import { getSettings } from '@/lib/settings';
 import { PrintHeader } from '@/components/PrintHeader';
+import { SlipFooter } from '@/components/SlipFooter';
 import { peso } from '@/lib/money';
 import { fmtDate, fmtDateTime } from '@/lib/dates';
 import { DELIVERY_METHOD, DELIVERY_STATUS } from '@/lib/labels';
+import { specsText } from '@/lib/pricing';
 
 export const metadata = { title: 'Delivery slip' };
 
@@ -41,8 +43,8 @@ export default async function DeliverySlipPage({ params }: { params: Promise<{ i
   );
 
   return (
-    <div className="mx-auto w-[148mm] bg-white p-[8mm] text-[11px] leading-snug text-black shadow print:w-auto print:p-0 print:shadow-none">
-      <style>{'@page { size: A5; margin: 8mm }'}</style>
+    <div className="mx-auto w-[8.5in] max-w-full bg-white p-[8mm] text-[11px] leading-snug text-black shadow print:w-auto print:p-0 print:shadow-none">
+      <style>{'@page { size: 8.5in 5.5in; margin: 8mm }'}</style>
 
       <PrintHeader s={s} title={d.method === 'PICKUP' ? 'Pickup slip' : 'Delivery slip'} docNo={d.order.orderNo} date={`Slip #${d.id} · printed ${fmtDateTime(new Date())}`} badge={d.status === 'CANCELLED' ? 'CANCELLED' : null} />
 
@@ -74,7 +76,7 @@ export default async function DeliverySlipPage({ params }: { params: Promise<{ i
             <tr key={it.id} className="border-b border-gray-500 align-top">
               <td className="py-1 pr-2">
                 <div className="font-medium">{it.description}{it.widthFt && it.heightFt ? ` (${it.widthFt} × ${it.heightFt} ft)` : ''}</div>
-                {it.specs.length > 0 && <div className="text-[10px] text-black">{it.specs.map((sp) => `${sp.name}: ${sp.value}`).join('; ')}</div>}
+                {it.specs.length > 0 && <div className="text-[10px] text-black">{specsText(it.specs)}</div>}
               </td>
               <td className="py-1 text-right font-medium">{it.quantity}</td>
             </tr>
@@ -97,7 +99,7 @@ export default async function DeliverySlipPage({ params }: { params: Promise<{ i
         </div>
       </div>
 
-      {s.receipt_footer && <p className="mt-4 text-center text-[10px] text-black">{s.receipt_footer}</p>}
+      {s.receipt_footer && <SlipFooter text={s.receipt_footer} className="mt-4 text-[10px]" />}
     </div>
   );
 }

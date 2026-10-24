@@ -24,7 +24,7 @@ export default async function PrintRunPayslipsPage({ params }: { params: Promise
     <>
       <style>{PAYSLIP_PAGE_CSS}</style>
       {payslips.length === 0 ? (
-        <div className="mx-auto max-w-[148mm] bg-white p-8 text-center text-sm shadow">No payslips in this payroll run.</div>
+        <div className="mx-auto max-w-[8.5in] bg-white p-8 text-center text-sm shadow">No payslips in this payroll run.</div>
       ) : (
         payslips.map((p) => <PayslipDoc key={p.id} p={p} s={s} />)
       )}

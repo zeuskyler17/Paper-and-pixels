@@ -1,6 +1,6 @@
 // Types and pure helpers shared by the POS client screen and the order server actions.
 // No server-only imports here: this file is bundled into the client.
-import type { PricingOption, PricingProduct, Selection } from '@/lib/pricing';
+import type { SpecialPrice, PricingOption, PricingProduct, Selection } from '@/lib/pricing';
 
 export type PosOption = PricingOption & { defaultValue: number | null };
 
@@ -13,7 +13,13 @@ export type PosProduct = Omit<PricingProduct, 'options'> & {
   options: PosOption[];
 };
 
-export type PosCustomer = { id: number; name: string; mobile: string | null; facebook: string | null; isInternal?: boolean };
+export type PosCustomer = {
+  id: number; name: string; mobile: string | null; facebook: string | null; isInternal?: boolean; specialDiscountPct?: number | null;
+  /** Owner-set special prices for this customer (fixed ₱ or % off per product). */
+  specialPrices?: SpecialPrice[];
+  /** Loyalty points balance. */
+  points?: number;
+};
 
 export type OrderLineInput = {
   productId: number;
@@ -39,6 +45,8 @@ export type CreateOrderInput = {
   discountReason: string;
   /** Owner/admin approval PIN for the discount (required when discount > 0). Never stored. */
   discountPin?: string;
+  /** Loyalty points the customer uses on this order (promo must be on). */
+  pointsUsed?: number;
   paymentTerms: string;
   amountPaid: number; // centavos
   method: string;
@@ -116,7 +124,7 @@ export function sanitizeSelection(product: PosProduct, raw: Record<string, unkno
       if (!opt.values.some((x) => x.id === id)) errors.push(`${product.name}: the chosen ${opt.name} is no longer available.`);
       else selection[opt.id] = id;
     } else if (opt.type === 'MULTI') {
-      const ids = Array.isArray(v) ? v.map(Number) : [];
+      const ids = Array.isArray(v) ? v.map(Number).filter((id) => id > 0) : []; // a blank add-on row on the form is 0
       const bad = ids.filter((id) => !opt.values.some((x) => x.id === id));
       if (bad.length) errors.push(`${product.name}: a chosen ${opt.name} is no longer available.`);
       selection[opt.id] = [...new Set(ids.filter((id) => !bad.includes(id)))];

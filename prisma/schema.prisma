@@ -223,19 +223,28 @@ model Attachment {
 // ───────────────────────── Customers & suppliers ─────────────────────────
 
 model Customer {
-  id        Int       @id @default(autoincrement())
-  name      String
-  mobile    String?
-  facebook  String? // Facebook name or profile link
-  email     String?
-  address   String?
-  notes     String?
+  id                 Int             @id @default(autoincrement())
+  name               String
+  mobile             String?
+  facebook           String? // Facebook name or profile link
+  email              String?
+  address            String?
+  notes              String?
   /// The shop's own branch: orders are stock transfers — no prices, no payments, excluded from sales figures.
-  isInternal Boolean  @default(false)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  orders    Order[]
-  payments  Payment[]
+  isInternal         Boolean         @default(false)
+  /// Owner/admin hid this customer's balance (receivable) from non-admin logins.
+  balanceHidden      Boolean         @default(false)
+  /// Owner/admin-approved special discount for this customer, in percent (e.g. 10 = 10% off every order). Applied without the approval PIN.
+  specialDiscountPct Float?
+  /// Loyalty points balance (sum of points_entries) and pesos paid that did not yet make a full earning step (centavos).
+  points             Int             @default(0)
+  pointsCarry        Int             @default(0)
+  pointsEntries      PointsEntry[]
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  orders             Order[]
+  payments           Payment[]
+  specialPrices      CustomerPrice[]
 
   @@index([name])
   @@map("customers")
@@ -290,6 +299,8 @@ model Product {
   bom         BillOfMaterial[]
   orderItems  OrderItem[]
 
+  customerPrices CustomerPrice[]
+
   @@map("products")
 }
 
@@ -331,22 +342,22 @@ model ProductOptionValue {
 ///   quantity × line qty × (area in sq ft if PER_SQFT and not perPiece) × (numeric option value if optionId set)
 /// and the line is only applied when optionValueId is null or that value was chosen.
 model BillOfMaterial {
-  id            Int                 @id @default(autoincrement())
-  productId     Int
-  product       Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
-  materialId    Int
-  material      Material            @relation(fields: [materialId], references: [id])
-  quantity      Float
+  id             Int                 @id @default(autoincrement())
+  productId      Int
+  product        Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
+  materialId     Int
+  material       Material            @relation(fields: [materialId], references: [id])
+  quantity       Float
   /// PER_SQFT products only: when true the quantity is per piece, not per sq ft (e.g. 8 eyelets per tarp).
-  perPiece      Boolean             @default(false)
-  optionId      Int?
-  option        ProductOption?      @relation(fields: [optionId], references: [id], onDelete: SetNull)
-  optionValueId Int?
-  optionValue   ProductOptionValue? @relation("BomCondition", fields: [optionValueId], references: [id], onDelete: SetNull)
+  perPiece       Boolean             @default(false)
+  optionId       Int?
+  option         ProductOption?      @relation(fields: [optionId], references: [id], onDelete: SetNull)
+  optionValueId  Int?
+  optionValue    ProductOptionValue? @relation("BomCondition", fields: [optionValueId], references: [id], onDelete: SetNull)
   /// Optional second condition: the line applies only when BOTH chosen values are selected (e.g. Size AND Paper).
   optionValue2Id Int?
-  optionValue2  ProductOptionValue? @relation("BomCondition2", fields: [optionValue2Id], references: [id], onDelete: SetNull)
-  notes         String?
+  optionValue2   ProductOptionValue? @relation("BomCondition2", fields: [optionValue2Id], references: [id], onDelete: SetNull)
+  notes          String?
 
   @@map("bill_of_materials")
 }
@@ -364,6 +375,11 @@ model Order {
   subtotal             Int           @default(0)
   discount             Int           @default(0)
   discountReason       String?
+  /// Loyalty points used on this order and the amount they took off (centavos). total = subtotal − discount − pointsAmount.
+  pointsUsed           Int           @default(0)
+  pointsAmount         Int           @default(0)
+  /// false when the order used a special customer discount: its payments earn no loyalty points.
+  earnsPoints          Boolean       @default(true)
   /// Admin whose password approved the discount.
   discountApprovedById Int?
   discountApprovedBy   User?         @relation("DiscountApprovedBy", fields: [discountApprovedById], references: [id])
@@ -801,6 +817,8 @@ model Employee {
   shiftStart       String           @default("08:00")
   shiftEnd         String           @default("17:00")
   breakMinutes     Int              @default(60)
+  /// Late grace period for this employee (minutes); empty = the shop default in Settings.
+  lateGraceMinutes Int?
   /// ISO weekdays worked, 1 = Mon … 7 = Sun, e.g. "1,2,3,4,5,6".
   workDays         String           @default("1,2,3,4,5,6")
   sssNo            String?
@@ -847,6 +865,9 @@ model TimeEntry {
   lateMinutes      Int         @default(0)
   undertimeMinutes Int         @default(0)
   overtimeMinutes  Int         @default(0)
+  /// Minutes over the allowed break time (break punches vs the shop's break schedule); counted as undertime.
+  overbreakMinutes Int         @default(0)
+  breaks           TimeBreak[]
   /// Selfies taken by the time clock at the moment of each punch (admin-only).
   timeInPhotoId    Int?        @unique
   timeInPhoto      Attachment? @relation("TimeInPhoto", fields: [timeInPhotoId], references: [id])
@@ -878,6 +899,22 @@ model TimeEntry {
   @@unique([employeeId, workDate])
   @@index([workDate])
   @@map("time_entries")
+}
+
+/// One break taken during a work day (time clock "Start break" / "End break").
+model TimeBreak {
+  id            Int       @id @default(autoincrement())
+  entryId       Int
+  entry         TimeEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  startAt       DateTime
+  endAt         DateTime?
+  startByUserId Int?
+  endByUserId   Int?
+  deviceId      String?   @db.VarChar(40)
+  createdAt     DateTime  @default(now())
+
+  @@index([entryId])
+  @@map("time_breaks")
 }
 
 model Holiday {
@@ -1045,4 +1082,40 @@ model AccessRole {
   users       User[]
 
   @@map("roles")
+}
+
+/// Owner/admin-set special discount for one customer on one product: this amount is deducted from each item's normal price.
+model CustomerPrice {
+  id          Int      @id @default(autoincrement())
+  customerId  Int
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  productId   Int
+  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// Centavos taken off the normal unit price of each item (e.g. 300 = ₱3 off each).
+  amountOff   Int
+  createdById Int?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([customerId, productId])
+  @@map("customer_prices")
+}
+
+/// Loyalty points ledger: + earned on payments, − used on orders, reversals and manual adjustments.
+model PointsEntry {
+  id          Int      @id @default(autoincrement())
+  customerId  Int
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  points      Int // signed
+  kind        String   @db.VarChar(12) // EARN | REDEEM | REVERSE | REFUND | ADJUST
+  paymentId   Int?
+  orderId     Int?
+  note        String?
+  createdById Int?
+  createdAt   DateTime @default(now())
+
+  @@index([customerId, createdAt])
+  @@index([paymentId])
+  @@index([orderId])
+  @@map("points_entries")
 }

@@ -7,6 +7,7 @@ import { addDays, daysBetween, fmtDate, isOverdue, manilaRange, parseDateInput, 
 import { MATERIAL_LEVEL, MOVEMENT_TYPE, PAYMENT_METHOD } from '@/lib/labels';
 import { can, type Access, type Permission } from '@/lib/permissions';
 import { rollLength } from '@/lib/rolls';
+import { groupSpecs } from '@/lib/pricing';
 
 export type ColType = 'text' | 'money' | 'number' | 'date';
 export type Column = { key: string; label: string; type: ColType };
@@ -25,6 +26,7 @@ export type ReportData = ReportTable & {
 export type ReportParams = { from: string; to: string; group?: string };
 
 export const REPORTS = {
+  daily: { title: 'Daily report', description: 'One day: sales collected less expenses, payments, receiving accounts, products and items sold.', usesRange: false, singleDay: true },
   sales: { title: 'Sales summary', description: 'Orders, gross & net sales, discounts and collections by day, week or month.', usesRange: true },
   'sales-by-category': { title: 'Sales by product category', description: 'Quantity and amount sold per category and per product.', usesRange: true },
   payments: { title: 'Payments collected by method', description: 'Cash, GCash, Maya, bank transfer… (non-voided payments).', usesRange: true },
@@ -39,8 +41,8 @@ export const REPORTS = {
 export type ReportKey = keyof typeof REPORTS;
 
 /** "All reports" opens everything; the production / inventory report permissions open just their report. */
-const REPORT_ACCESS: Partial<Record<ReportKey, Permission | Permission[]>> = { workers: 'reports_production', inventory: 'reports_inventory', printing: ['reports_production', 'reports_inventory'] };
-export const ANY_REPORT: Permission[] = ['reports', 'reports_production', 'reports_inventory'];
+const REPORT_ACCESS: Partial<Record<ReportKey, Permission | Permission[]>> = { workers: 'reports_production', inventory: 'reports_inventory', printing: ['reports_production', 'reports_inventory'], sales: 'reports_sales', 'sales-by-category': 'reports_sales', daily: 'reports_daily' };
+export const ANY_REPORT: Permission[] = ['reports', 'reports_daily', 'reports_sales', 'reports_production', 'reports_inventory'];
 
 export function canSeeReport(user: Access, key: ReportKey): boolean {
   const extra = REPORT_ACCESS[key];
@@ -53,8 +55,9 @@ export function isReportKey(k: string): k is ReportKey {
 
 /** Validate from/to search params (defaults: this month to date). */
 export function normalizeParams(sp: { from?: string | null; to?: string | null; group?: string | null }): ReportParams {
-  let from = sp.from && parseDateInput(sp.from) ? sp.from : startOfMonthManila();
   let to = sp.to && parseDateInput(sp.to) ? sp.to : todayManila();
+  // No "from" (e.g. the Daily report's single day picker): start of month, or the day itself when it is earlier.
+  let from = sp.from && parseDateInput(sp.from) ? sp.from : (to < startOfMonthManila() ? to : startOfMonthManila());
   if (from > to) [from, to] = [to, from];
   const group = sp.group === 'weekly' || sp.group === 'monthly' ? sp.group : 'daily';
   return { from, to, group };
@@ -72,12 +75,14 @@ export function mondayOf(dateStr: string): string {
   return addDays(dateStr, dow === 0 ? -6 : 1 - dow);
 }
 
-export async function buildReport(key: ReportKey, p: ReportParams): Promise<ReportData> {
+/** viewerIsAdmin: owners / admins also see customers whose balance is hidden from staff. */
+export async function buildReport(key: ReportKey, p: ReportParams, viewerIsAdmin = false): Promise<ReportData> {
   switch (key) {
+    case 'daily': return dailyReport(p.to);
     case 'sales': return salesSummary(p);
     case 'sales-by-category': return salesByCategory(p);
     case 'payments': return paymentsByMethod(p);
-    case 'receivables': return receivables();
+    case 'receivables': return receivables(viewerIsAdmin);
     case 'expenses': return expensesByCategory(p);
     case 'profit': return profitSummary(p);
     case 'inventory': return inventoryReport(p);
@@ -179,7 +184,7 @@ async function productsSoldTables(start: Date, end: Date): Promise<ReportTable[]
   const detailRows: Row[] = items.map((it) => {
     const parts = [
       it.widthFt && it.heightFt ? `${it.widthFt} × ${it.heightFt} ft` : null,
-      ...it.specs.map((s) => `${s.name}: ${s.value}`),
+      ...groupSpecs(it.specs).map(([n, v]) => `${n}: ${v}`),
       it.specsNotes,
     ].filter(Boolean);
     return {
@@ -382,9 +387,20 @@ async function paymentsByAccount(start: Date, end: Date): Promise<ReportTable> {
 
 // ───────────── 4. Accounts receivable ─────────────
 
-async function receivables(): Promise<ReportData> {
+async function receivables(viewerIsAdmin: boolean): Promise<ReportData> {
+  const t = await receivablesTable(viewerIsAdmin);
+  return {
+    ...t,
+    title: REPORTS.receivables.title,
+    period: `As of ${fmtDate(new Date())}`,
+    notes: ['Aging is based on each order’s creation date. Cancelled orders are excluded. The date range does not apply to this report.'],
+  };
+}
+
+/** Customers who still owe, with aging (as of now). */
+async function receivablesTable(viewerIsAdmin = false): Promise<ReportTable> {
   const orders = await prisma.order.findMany({
-    where: { status: { not: 'CANCELLED' }, balance: { gt: 0 }, customer: { isInternal: false } },
+    where: { status: { not: 'CANCELLED' }, balance: { gt: 0 }, customer: { isInternal: false, ...(viewerIsAdmin ? {} : { balanceHidden: false }) } },
     select: { createdAt: true, balance: true, customerId: true, customer: { select: { name: true, mobile: true } } },
   });
   const now = new Date();
@@ -404,8 +420,7 @@ async function receivables(): Promise<ReportData> {
   }));
   const s = (k: string) => sum(rows.map((r) => r[k] as number));
   return {
-    title: REPORTS.receivables.title,
-    period: `As of ${fmtDate(now)}`,
+    title: `Receivables — customers who owe (as of ${fmtDate(now)})`,
     columns: [
       { key: 'customer', label: 'Customer', type: 'text' },
       { key: 'mobile', label: 'Mobile', type: 'text' },
@@ -418,7 +433,6 @@ async function receivables(): Promise<ReportData> {
     ],
     rows,
     totals: { customer: 'Total', mobile: null, orders: s('orders'), oldest: null, balance: s('balance'), b30: s('b30'), b60: s('b60'), b60p: s('b60p') },
-    notes: ['Aging is based on each order’s creation date. Cancelled orders are excluded. The date range does not apply to this report.'],
   };
 }
 
@@ -752,6 +766,108 @@ async function photoPrinting(p: ReportParams): Promise<ReportData> {
       'Prints come from order lines of products that use roll paper (Photo Print and your own print sizes). Paper is deducted when the job is started, so "Not yet printed" lines show no length yet.',
       'Length used is what the bill of materials deducted (print length × prints); Rolls = length ÷ roll length. Paper cost uses the roll’s cost at the time of printing.',
       '"Outside orders" are lengths recorded with "Record a print outside an order" on the Photo paper rolls page.',
+    ],
+  };
+}
+
+// ───────────── Daily report ─────────────
+
+/**
+ * One day for the counter: money collected less expenses, every payment, receiving accounts,
+ * products sold and the items in detail. Branch transfers (₱0) are excluded.
+ */
+async function dailyReport(day: string): Promise<ReportData> {
+  const { start, end } = manilaRange(day, day);
+  const [payments, expenses, byAccount, sold] = await Promise.all([
+    prisma.payment.findMany({
+      where: { paidAt: { gte: start, lt: end }, voided: false },
+      orderBy: { paidAt: 'asc' },
+      select: {
+        receiptNo: true, paidAt: true, amount: true, method: true, reference: true,
+        account: { select: { label: true } }, receivedBy: { select: { name: true } },
+        customer: { select: { name: true } }, order: { select: { id: true, orderNo: true } },
+      },
+    }),
+    prisma.expense.findMany({
+      where: { date: { gte: start, lt: end }, voided: false },
+      orderBy: { createdAt: 'asc' },
+      select: { amount: true, paidVia: true, notes: true, otherDetail: true, category: { select: { name: true } }, createdBy: { select: { name: true } } },
+    }),
+    paymentsByAccount(start, end),
+    productsSoldTables(start, end),
+  ]);
+  const time = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' });
+
+  const collected = sum(payments.map((p) => p.amount));
+  const spent = sum(expenses.map((e) => e.amount));
+  const cashIn = sum(payments.filter((p) => p.method === 'CASH').map((p) => p.amount));
+  const cashOut = sum(expenses.filter((e) => e.paidVia === 'CASH').map((e) => e.amount));
+  const methods = Object.entries(PAYMENT_METHOD)
+    .map(([m, label]) => ({ label, amount: sum(payments.filter((p) => p.method === m).map((p) => p.amount)), count: payments.filter((p) => p.method === m).length }))
+    .filter((m) => m.count > 0);
+
+  const summary: Row[] = [
+    { item: 'Sales collected (all payments)', count: payments.length, amount: collected },
+    ...methods.map((m) => ({ item: `   · ${m.label}`, count: m.count, amount: m.amount })),
+    { item: 'Less: expenses', count: expenses.length, amount: -spent },
+    { item: 'NET — sales collected less expenses', count: null, amount: collected - spent },
+    { item: 'Cash on hand today (cash collected − cash expenses)', count: null, amount: cashIn - cashOut },
+  ];
+
+  const paymentRows: Row[] = payments.map((p) => ({
+    _href: `/orders/${p.order.id}`,
+    receipt: p.receiptNo, time: time.format(p.paidAt), customer: p.customer.name, orderNo: p.order.orderNo,
+    method: PAYMENT_METHOD[p.method], account: p.method === 'CASH' ? 'Cash drawer' : p.account?.label ?? '— not specified —',
+    reference: p.reference ?? '', by: p.receivedBy.name, amount: p.amount,
+  }));
+  const expenseRows: Row[] = expenses.map((e) => ({
+    category: e.category.name, details: [e.otherDetail, e.notes].filter(Boolean).join(' — '), via: PAYMENT_METHOD[e.paidVia], by: e.createdBy.name, amount: e.amount,
+  }));
+
+  return {
+    title: REPORTS.daily.title,
+    period: fmtDate(parseDateInput(day)),
+    columns: [
+      { key: 'item', label: 'Summary', type: 'text' },
+      { key: 'count', label: 'Count', type: 'number' },
+      { key: 'amount', label: 'Amount', type: 'money' },
+    ],
+    rows: summary,
+    extra: [
+      {
+        title: 'Daily sales collected (payments received)',
+        columns: [
+          { key: 'receipt', label: 'Receipt', type: 'text' },
+          { key: 'time', label: 'Time', type: 'text' },
+          { key: 'customer', label: 'Customer', type: 'text' },
+          { key: 'orderNo', label: 'Order', type: 'text' },
+          { key: 'method', label: 'Method', type: 'text' },
+          { key: 'account', label: 'Received in', type: 'text' },
+          { key: 'reference', label: 'Reference', type: 'text' },
+          { key: 'by', label: 'Received by', type: 'text' },
+          { key: 'amount', label: 'Amount', type: 'money' },
+        ],
+        rows: paymentRows,
+        totals: { receipt: 'Total', time: null, customer: null, orderNo: null, method: null, account: null, reference: null, by: null, amount: collected },
+      },
+      {
+        title: 'Expenses',
+        columns: [
+          { key: 'category', label: 'Category', type: 'text' },
+          { key: 'details', label: 'Details', type: 'text' },
+          { key: 'via', label: 'Paid via', type: 'text' },
+          { key: 'by', label: 'Recorded by', type: 'text' },
+          { key: 'amount', label: 'Amount', type: 'money' },
+        ],
+        rows: expenseRows,
+        totals: { category: 'Total', details: null, via: null, by: null, amount: spent },
+      },
+      { ...byAccount, title: 'By receiving account (GCash / Maya / bank — cash is in the summary)' },
+      ...sold,
+    ],
+    notes: [
+      'Sales collected = payments received on this day (by payment date), including balances paid on older orders. Voided payments and expenses are excluded.',
+      'Products sold and items sold are orders created on this day (cancelled orders and branch transfers excluded); amounts are before order discounts.',
     ],
   };
 }

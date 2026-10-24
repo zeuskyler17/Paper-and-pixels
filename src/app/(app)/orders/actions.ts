@@ -7,7 +7,8 @@ import { assertUser } from '@/lib/auth';
 import { attempt, logActionError, optInt, optStr, str, type ActionState } from '@/lib/action';
 import { audit } from '@/lib/audit';
 import { nextNumber } from '@/lib/counters';
-import { computeUnitPrice } from '@/lib/pricing';
+import { applySpecialPrice, computeUnitPrice } from '@/lib/pricing';
+import { earnForPayment, getPointsConfig, redeemOnOrder, refundForOrder, reverseForPayment, usedThisWeek } from '@/lib/points';
 import { recalcOrder, markOrderDelivered } from '@/lib/orders';
 import { deductBomForOrderItem, returnJobMaterials, returnOrderLineMaterials } from '@/lib/inventory';
 import { verifyApprovalPin } from '@/lib/approval';
@@ -37,6 +38,11 @@ function revalidateOrder(orderId: number) {
 
 // ───────── POS helpers (called directly from the client) ─────────
 
+/** The pre-approved part of a discount: the customer's special % of the subtotal (0 when none). */
+function specialDiscountAmount(pct: number | null | undefined, subtotal: number): number {
+  return pct && pct > 0 ? Math.round((subtotal * Math.min(pct, 100)) / 100) : 0;
+}
+
 export async function searchCustomers(q: string): Promise<PosCustomer[]> {
   await assertUser('orders');
   const term = String(q ?? '').trim();
@@ -46,7 +52,7 @@ export async function searchCustomers(q: string): Promise<PosCustomer[]> {
       : {},
     orderBy: term ? { name: 'asc' } : { updatedAt: 'desc' },
     take: 15,
-    select: { id: true, name: true, mobile: true, facebook: true, isInternal: true },
+    select: { id: true, name: true, mobile: true, facebook: true, isInternal: true, specialDiscountPct: true, specialPrices: { select: { productId: true, amountOff: true } }, points: true },
   });
 }
 
@@ -62,7 +68,7 @@ export async function quickCreateCustomer(input: { name: string; mobile: string;
       return c;
     });
     revalidatePath('/customers');
-    return { id: c.id, customer: { id: c.id, name: c.name, mobile: c.mobile, facebook: c.facebook } };
+    return { id: c.id, customer: { id: c.id, name: c.name, mobile: c.mobile, facebook: c.facebook, specialPrices: [] } };
   } catch (e) {
     return { error: errMsg(e) };
   }
@@ -89,8 +95,9 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
     const reference = String(input.reference ?? '').trim() || null;
 
     const order = await prisma.$transaction(async (tx) => {
-      const customer = await tx.customer.findUnique({ where: { id: customerId } });
+      const customer = await tx.customer.findUnique({ where: { id: customerId }, include: { specialPrices: true } });
       if (!customer) throw new Error('Customer not found.');
+      const specialBy = new Map(customer.specialPrices.map((sp) => [sp.productId, sp]));
       // Own branch: a stock transfer, not a sale — no prices, discounts or payments.
       const internal = customer.isInternal;
       if (internal && (discount > 0 || amountPaid > 0)) throw new Error(`${customer.name} is a branch of the shop: transfers have no prices, discounts or payments.`);
@@ -118,7 +125,9 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
         const quantity = Number(l.quantity);
         if (!Number.isInteger(quantity) || quantity < 1) errors.push(`Item ${n}: quantity must be a whole number of at least 1.`);
 
-        const suggested = internal ? 0 : price.unitPrice;
+        // The customer's special price (set by the owner) becomes the normal price for this order: no reason or approval needed.
+        const special = internal ? null : applySpecialPrice(price.unitPrice, specialBy.get(product.id));
+        const suggested = internal ? 0 : special ?? price.unitPrice;
         let unitPrice = suggested;
         let overrideReason: string | null = null;
         if (!internal && l.unitPrice !== null && l.unitPrice !== undefined) {
@@ -140,6 +149,7 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
           unitPrice,
           overrideReason,
           lineTotal: unitPrice * (Number.isInteger(quantity) ? quantity : 0),
+          specialUsed: special !== null,
           specs: price.specs,
           specsNotes: String(l.specsNotes ?? '').trim() || null,
           fileSource,
@@ -152,9 +162,31 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
       const subtotal = items.reduce((s, x) => s + x.lineTotal, 0);
       if (discount < 0) throw new Error('Discount cannot be negative.');
       if (discount > subtotal) throw new Error('Discount cannot be more than the subtotal.');
-      if (discount > 0 && !discountReason) throw new Error('Enter a reason for the discount.');
-      const approver = discount > 0 ? await verifyApprovalPin(tx, input.discountPin, user.id, 'a discount') : null;
-      const total = subtotal - discount;
+      // The customer's special discount (set by the owner) is pre-approved: no PIN up to that amount.
+      const special = specialDiscountAmount(customer.specialDiscountPct, subtotal);
+      const preApproved = discount > 0 && discount <= special;
+      const reason = discountReason ?? (preApproved ? `Special customer discount (${customer.specialDiscountPct}%)` : null);
+      if (discount > 0 && !reason) throw new Error('Enter a reason for the discount.');
+      const approver = discount > 0 && !preApproved ? await verifyApprovalPin(tx, input.discountPin, user.id, 'a discount') : null;
+
+      // Loyalty points used as pesos off (promo on, enough points, weekly limit, not more than the order).
+      const pts = await getPointsConfig();
+      const pointsUsed = Math.max(0, Math.floor(Number(input.pointsUsed) || 0));
+      let pointsAmount = 0;
+      if (pointsUsed > 0) {
+        if (!pts.enabled) throw new Error('The points promo is off.');
+        if (internal) throw new Error('Branch transfers cannot use points.');
+        if (pointsUsed > customer.points) throw new Error(`${customer.name} has only ${customer.points} point(s).`);
+        if (pts.weekCap > 0) {
+          const used = await usedThisWeek(tx, customerId);
+          if (used + pointsUsed > pts.weekCap) throw new Error(`${customer.name} can use at most ${pts.weekCap} points a week — ${Math.max(0, pts.weekCap - used)} left this week.`);
+        }
+        pointsAmount = pointsUsed * pts.valueCentavos;
+        if (pointsAmount > subtotal - discount) throw new Error(`${pointsUsed} points (${peso(pointsAmount)}) is more than the order (${peso(subtotal - discount)}). Use fewer points.`);
+      }
+      // Orders with a special customer discount earn no points.
+      const earnsPoints = !internal && !preApproved && !items.some((x) => x.specialUsed);
+      const total = subtotal - discount - pointsAmount;
 
       if (amountPaid < 0) throw new Error('Amount paid cannot be negative.');
       if (amountPaid > total) throw new Error(`Amount paid is more than the order total (${peso(total)}). Record only the amount applied to this order.`);
@@ -170,10 +202,13 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
       const order = await tx.order.create({
         data: {
           orderNo, customerId, status: 'PENDING', paymentTerms: terms, subtotal, discount,
-          discountReason: discount > 0 ? discountReason : null, discountApprovedById: approver?.id ?? null, total, balance: total,
+          discountReason: discount > 0 ? reason : null, discountApprovedById: approver?.id ?? null, total, balance: total,
+          pointsUsed, pointsAmount, earnsPoints,
           targetDate, notes, createdById: user.id,
         },
       });
+
+      if (pointsUsed > 0) await redeemOnOrder(tx, customerId, order.id, orderNo, pointsUsed, user.id);
 
       let jobs = 0;
       for (const it of items) {
@@ -219,11 +254,12 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
         });
         await audit(tx, user.id, 'CREATE', 'Payment', p.id, `${receiptNo}: ${peso(amountPaid)} ${PAYMENT_METHOD[method]} for ${orderNo}`,
           { orderId: order.id, amount: amountPaid, method, reference });
+        await earnForPayment(tx, p.id, user.id, pts);
       }
 
       await recalcOrder(tx, order.id);
       await audit(tx, user.id, 'CREATE', 'Order', order.id, `Created order ${orderNo} for ${customer.name} — ${peso(total)}`, {
-        customerId, subtotal, discount, discountReason, discountApprovedBy: approver?.name ?? null, total, paymentTerms: terms, amountPaid, receiptNo, jobs,
+        customerId, subtotal, discount, pointsUsed, pointsAmount, earnsPoints, discountReason: reason, discountApprovedBy: approver?.name ?? (preApproved ? 'special customer discount' : null), total, paymentTerms: terms, amountPaid, receiptNo, jobs,
         items: items.map((x) => ({ productId: x.product.id, name: x.product.name, qty: x.quantity, unitPrice: x.unitPrice, suggested: x.suggested })),
       });
       return order;
@@ -249,6 +285,7 @@ export async function addPayment(orderId: number, _prev: ActionState, fd: FormDa
     const reference = optStr(fd, 'reference');
     const notes = optStr(fd, 'notes');
     let receiptNo = '';
+    let earned = 0;
     await prisma.$transaction(async (tx) => {
       const order = await tx.order.findUniqueOrThrow({ where: { id: orderId }, include: { customer: { select: { isInternal: true, name: true } } } });
       if (order.status === 'CANCELLED') throw new Error('This order is cancelled.');
@@ -262,9 +299,10 @@ export async function addPayment(orderId: number, _prev: ActionState, fd: FormDa
       await recalcOrder(tx, orderId);
       await audit(tx, user.id, 'CREATE', 'Payment', p.id, `${receiptNo}: ${peso(amount)} ${PAYMENT_METHOD[method]} for ${order.orderNo}`,
         { orderId, amount, method, accountId, reference, notes });
+      earned = await earnForPayment(tx, p.id, user.id);
     });
     revalidateOrder(orderId);
-    return { ok: `Payment recorded — receipt ${receiptNo}.` };
+    return { ok: `Payment recorded — receipt ${receiptNo}.${earned ? ` Customer earned ${earned} point${earned === 1 ? '' : 's'}.` : ''}` };
   });
 }
 
@@ -282,6 +320,7 @@ export async function voidPayment(paymentId: number, _prev: ActionState, fd: For
       const approver = await verifyApprovalPin(tx, str(fd, 'approvalPin'), user.id, 'a void');
       await tx.payment.update({ where: { id: paymentId }, data: { voided: true, voidReason: reason, voidedAt: new Date(), voidedById: user.id, voidApprovedById: approver.id } });
       await recalcOrder(tx, p.orderId);
+      await reverseForPayment(tx, paymentId, user.id);
       await audit(tx, user.id, 'VOID', 'Payment', paymentId, `Voided ${p.receiptNo} (${peso(p.amount)}) on ${p.order.orderNo}: ${reason} — approved by ${approver.name}`,
         { amount: p.amount, reason, approvedBy: approver.name });
     });
@@ -305,20 +344,22 @@ export async function updateOrderHeader(orderId: number, _prev: ActionState, fd:
     const notes = optStr(fd, 'notes');
 
     await prisma.$transaction(async (tx) => {
-      const before = await tx.order.findUniqueOrThrow({ where: { id: orderId } });
+      const before = await tx.order.findUniqueOrThrow({ where: { id: orderId }, include: { customer: { select: { specialDiscountPct: true } } } });
       if (before.status === 'CANCELLED') throw new Error('This order is cancelled.');
-      if (discount > before.subtotal) throw new Error('Discount cannot be more than the subtotal.');
-      if (discount > 0 && !discountReason) throw new Error('Enter a reason for the discount.');
-      const total = before.subtotal - discount;
+      if (discount > before.subtotal - before.pointsAmount) throw new Error('Discount cannot be more than the subtotal (after points used).');
+      const preApproved = discount > 0 && discount <= specialDiscountAmount(before.customer.specialDiscountPct, before.subtotal);
+      const reasonText = discountReason ?? (preApproved ? `Special customer discount (${before.customer.specialDiscountPct}%)` : null);
+      if (discount > 0 && !reasonText) throw new Error('Enter a reason for the discount.');
+      const total = before.subtotal - discount - before.pointsAmount;
       if (total < before.amountPaid) throw new Error(`The new total (${peso(total)}) is less than what was already paid (${peso(before.amountPaid)}). Void a payment first.`);
       // Adding or changing a discount needs an owner/admin password; removing one does not.
       const discountChanged = discount !== before.discount;
-      const approver = discountChanged && discount > 0
+      const approver = discountChanged && discount > 0 && !preApproved
         ? await verifyApprovalPin(tx, str(fd, 'discountPin'), user.id, 'a discount')
         : null;
-      const discountApprovedById = discount === 0 ? null : discountChanged ? approver!.id : before.discountApprovedById;
+      const discountApprovedById = discount === 0 ? null : discountChanged ? approver?.id ?? null : before.discountApprovedById;
 
-      const data = { targetDate, paymentTerms: terms, discount, discountReason: discount > 0 ? discountReason : null, discountApprovedById, total, notes };
+      const data = { targetDate, paymentTerms: terms, discount, discountReason: discount > 0 ? reasonText : null, discountApprovedById, total, notes };
       await tx.order.update({ where: { id: orderId }, data });
       if ((before.targetDate?.getTime() ?? null) !== (targetDate?.getTime() ?? null)) {
         await tx.job.updateMany({ where: { orderId, status: { notIn: ['COMPLETED', 'CANCELLED'] } }, data: { dueDate: targetDate } });
@@ -388,6 +429,7 @@ export async function cancelOrder(orderId: number, _prev: ActionState, fd: FormD
       }
       // Lines without a production job had their materials deducted when the order was made.
       returned += await returnOrderLineMaterials(tx, order.orderNo, user.id, `order ${order.orderNo} cancelled (${reason})`);
+      await refundForOrder(tx, orderId, user.id);
       await recalcOrder(tx, orderId);
       const data: Prisma.InputJsonValue = { reason, total: order.total, amountPaid: order.amountPaid, jobsCancelled: open.map((j) => j.id), materialLinesReturned: returned };
       await audit(tx, user.id, 'CANCEL', 'Order', orderId, `Cancelled order ${order.orderNo}: ${reason}`, data);

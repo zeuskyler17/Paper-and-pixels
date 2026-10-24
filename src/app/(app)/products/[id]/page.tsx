@@ -49,7 +49,7 @@ export default async function ProductPage({ params }: { params: Promise<{ id: st
 
   const numberOptions = product.options.filter((o) => o.type === 'NUMBER');
   const valueOptions = product.options.filter((o) => o.type !== 'NUMBER' && o.values.length > 0);
-  const materialOptions = materials.map((m) => ({ value: m.id, label: `${m.name} (${m.unit})${m.active ? '' : ' — inactive'}` }));
+  const materialOptions = materials.map((m) => ({ value: m.id, label: `${m.name} (${m.unit})${m.active ? '' : ' — inactive'}`, unit: m.unit }));
   const unitWord = product.pricingMode === 'PER_SQFT' ? 'sq ft' : product.unit;
 
   return (
@@ -270,21 +270,24 @@ function BomFields({
   materials, numberOptions, valueOptions, line, perSqft,
 }: {
   perSqft: boolean;
-  materials: { value: number; label: string }[];
+  materials: { value: number; label: string; unit: string }[];
   numberOptions: { id: number; name: string }[];
   valueOptions: { id: number; name: string; values: { id: number; label: string; active: boolean }[] }[];
   line?: { materialId: number; quantity: number; perPiece: boolean; optionId: number | null; optionValueId: number | null; optionValue2Id?: number | null; notes: string | null };
 }) {
+  // Saved quantities are in the material's own unit, so show that unit (e.g. cm) beside the number.
+  const savedUnit = materials.find((m) => m.value === line?.materialId)?.unit ?? '';
+  const lengthUnit = ['cm', 'in', 'm'].includes(savedUnit) ? savedUnit : '';
   return (
     <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-6">
       <Field label="Material *" className="lg:col-span-2">
         <Select name="materialId" required defaultValue={line?.materialId} placeholder="— choose —" options={materials} />
       </Field>
-      <Field label={perSqft ? 'Qty per sq ft / piece *' : 'Qty per 1 unit *'} hint="In the material's unit. For roll paper you can type a length: 18 cm, 14 in, 0.36 m — it is converted to metres.">
+      <Field label={perSqft ? 'Qty per sq ft / piece *' : 'Qty per 1 unit *'} hint={lengthUnit ? `Saved in ${lengthUnit} (the material's unit). Pick in / cm / m for the number you type; it is converted to ${lengthUnit}.` : "In the material's unit. For roll paper you can type a length (18 cm, 14 in) or pick the unit; it is converted to the roll's unit."}>
         <div className="flex gap-1">
           <input name="quantity" defaultValue={line?.quantity ?? ''} className="input min-w-0 flex-1" inputMode="decimal" required placeholder="e.g. 1 or 14 in" />
-          <select name="qtyUnit" defaultValue="" className="input w-20 shrink-0" aria-label="Unit typed" title="Unit of the number typed (rolls are kept in metres)">
-            <option value="">unit</option><option value="in">in</option><option value="cm">cm</option><option value="m">m</option>
+          <select name="qtyUnit" defaultValue={lengthUnit} className="input w-28 shrink-0" aria-label="Unit typed" title="Unit of the number typed">
+            <option value="">same as stock</option><option value="in">in</option><option value="cm">cm</option><option value="m">m</option>
           </select>
         </div>
       </Field>

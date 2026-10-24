@@ -26,7 +26,7 @@ export function toFormValues(e: Employee): EmployeeFormValues {
     position: e.position, mobile: e.mobile ?? '', email: e.email ?? '', address: e.address ?? '',
     birthDate: toDateInput(e.birthDate), hireDate: toDateInput(e.hireDate), status: e.status, endDate: toDateInput(e.endDate),
     payType: e.payType, rate: centavosToInput(e.rate), payFrequency: e.payFrequency,
-    shiftStart: e.shiftStart, shiftEnd: e.shiftEnd, breakMinutes: e.breakMinutes, workDays: e.workDays,
+    shiftStart: e.shiftStart, shiftEnd: e.shiftEnd, breakMinutes: e.breakMinutes, workDays: e.workDays, lateGraceMinutes: e.lateGraceMinutes == null ? '' : String(e.lateGraceMinutes),
     sssNo: e.sssNo ?? '', philhealthNo: e.philhealthNo ?? '', pagibigNo: e.pagibigNo ?? '', tin: e.tin ?? '',
     emergencyContact: e.emergencyContact ?? '', emergencyPhone: e.emergencyPhone ?? '', notes: e.notes ?? '', userId: e.userId,
   };

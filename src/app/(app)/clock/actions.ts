@@ -9,7 +9,7 @@ import { audit } from '@/lib/audit';
 import { logActionError } from '@/lib/action';
 import { parseDateInput } from '@/lib/dates';
 import { getSettings } from '@/lib/settings';
-import { clockPunch, verifyPin } from '@/lib/hr';
+import { clockBreak, clockPunch, verifyPin } from '@/lib/hr';
 import { fmtClock } from '@/lib/timekeeping';
 import { isGeoFix, type GeoFix } from '@/lib/geo';
 
@@ -94,6 +94,37 @@ export async function punch(employeeId: number, pin: string, photo?: string | nu
     revalidatePath('/timekeeping');
     revalidatePath('/me');
     return { ok: { action: r.action, name: r.name, time: fmtClock(r.at), lateMinutes: r.action === 'IN' ? r.lateMinutes : 0, photo: r.photo, location: r.location } };
+  } catch (e) {
+    logActionError(e);
+    return { error: e instanceof Error ? e.message : 'Something went wrong.' };
+  }
+}
+
+export type BreakResponse =
+  | { error: string }
+  | { ok: { action: 'BREAK_START' | 'BREAK_END'; name: string; time: string; minutes: number; overMinutes: number; slot: string | null } };
+
+/** Time-clock break punch: Start break / End break (PIN only; no selfie or location needed). */
+export async function breakPunch(employeeId: number, pin: string): Promise<BreakResponse> {
+  try {
+    const user = await assertUser();
+    if (!Number.isInteger(employeeId) || employeeId <= 0) return { error: 'Choose your name first.' };
+    if (!/^\d{4,6}$/.test(pin)) return { error: 'Enter your 4–6 digit PIN.' };
+    const deviceId = (await cookies()).get('pp_device')?.value ?? null;
+    const emp = await verifyPin(employeeId, pin).catch((e: unknown) => {
+      throw new Error(e instanceof Error && e.message === 'Employee not found.' ? 'Wrong PIN.' : e instanceof Error ? e.message : 'Wrong PIN.');
+    });
+    if (emp.status !== 'ACTIVE' && emp.status !== 'ON_LEAVE') return { error: 'Wrong PIN.' };
+    const r = await prisma.$transaction(async (tx) => {
+      const r = await clockBreak(tx, emp, user.id, deviceId && /^[a-f0-9]{32}$/.test(deviceId) ? deviceId : null);
+      const what = r.action === 'BREAK_START' ? 'break start' : `break end (${r.minutes} min${r.overMinutes ? `, ${r.overMinutes} min over` : ''})`;
+      await audit(tx, user.id, 'CLOCK', 'Employee', emp.id, `${r.name} ${what} ${fmtClock(r.at)} · via login ${user.username}`, { employeeId: emp.id, action: r.action, at: r.at.toISOString(), byUserId: user.id, deviceId });
+      return r;
+    });
+    revalidatePath('/clock');
+    revalidatePath('/timekeeping');
+    revalidatePath('/me');
+    return { ok: { action: r.action, name: r.name, time: fmtClock(r.at), minutes: r.minutes, overMinutes: r.overMinutes, slot: r.slot } };
   } catch (e) {
     logActionError(e);
     return { error: e instanceof Error ? e.message : 'Something went wrong.' };

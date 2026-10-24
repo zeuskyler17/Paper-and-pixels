@@ -6,6 +6,7 @@ import { requireUser, can } from '@/lib/auth';
 import { daysBetween, fmtDate, isOverdue, manilaDayRange, todayManila, addDays, fmtDateTime } from '@/lib/dates';
 import { Card, FilterBar, PageHeader } from '@/components/ui';
 import { Board, type JobCard } from './Board';
+import { groupSpecs } from '@/lib/pricing';
 
 export const metadata = { title: 'Production board' };
 
@@ -39,7 +40,8 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
   const doneCutoff = new Date(Date.now() - COMPLETED_DAYS * 86_400_000);
   const statusOr: Prisma.JobWhereInput[] = [
     { status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
-    alldone ? { status: 'COMPLETED' } : { status: 'COMPLETED', completedAt: { gte: doneCutoff } },
+    // Completed jobs stay on the board until their order is released / delivered (all completed: everything).
+    alldone ? { status: 'COMPLETED' } : { status: 'COMPLETED', completedAt: { gte: doneCutoff }, order: { status: { not: 'DELIVERED' } } },
   ];
   if (cancelled) statusOr.push({ status: 'CANCELLED' });
   and.push({ OR: statusOr });
@@ -54,7 +56,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
       orderBy: [{ dueDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
       take: 600,
       include: {
-        order: { select: { id: true, orderNo: true, customer: { select: { name: true } } } },
+        order: { select: { id: true, orderNo: true, status: true, balance: true, customer: { select: { name: true } }, jobs: { select: { status: true } } } },
         assignedTo: { select: { id: true, name: true } },
         assignedBy: { select: { name: true } },
         // latest status move (who moved it where); assignment-only log rows have no toStatus
@@ -90,7 +92,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
       category: it.product.category.name,
       quantity: it.quantity,
       size,
-      specs: it.specs.map((s) => `${s.name}: ${s.value}`),
+      specs: groupSpecs(it.specs).map(([n, v]) => `${n}: ${v}`),
       specsNotes: it.specsNotes,
       due: j.dueDate ? fmtDate(j.dueDate) : null,
       overdue: isOverdue(j.dueDate) && j.status !== 'COMPLETED' && j.status !== 'CANCELLED',
@@ -99,6 +101,9 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
       assignedName: j.assignedTo?.name ?? null,
       assignedBy: j.assignedBy && j.assignedAt ? `${j.assignedBy.name} · ${fmtDateTime(j.assignedAt)}` : null,
       lastMove: j.logs[0] ? { to: j.logs[0].toStatus!, by: j.logs[0].user.name, at: fmtDateTime(j.logs[0].createdAt) } : null,
+      release: j.status === 'COMPLETED' && j.order.status !== 'DELIVERED' && j.order.status !== 'CANCELLED'
+        ? { balance: j.order.balance, ready: j.order.jobs.every((x) => x.status === 'COMPLETED' || x.status === 'CANCELLED') }
+        : null,
     };
   });
 
@@ -145,7 +150,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
           <label className="flex items-center gap-1 text-sm"><input type="checkbox" name="cancelled" value="1" defaultChecked={!!cancelled} /> Show cancelled</label>
         </FilterBar>
       </Card>
-      <Board jobs={cards} workers={workers} canAssign={!isWorker} showCancelled={!!cancelled} />
+      <Board jobs={cards} workers={workers} canAssign={!isWorker} canRelease={can(user, 'orders')} showCancelled={!!cancelled} />
     </div>
   );
 }

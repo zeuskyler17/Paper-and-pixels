@@ -9,6 +9,7 @@ import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { ImageUpload } from '@/components/ImageUpload';
 import { Card, DL, Empty, PageHeader, StatusBadge } from '@/components/ui';
 import { addProgress, assignWorkerForm, cancelJob, setJobStatus, takeJobForm } from '../actions';
+import { groupSpecs } from '@/lib/pricing';
 
 export default async function JobPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requireUser(['jobs_manage', 'jobs_own']);
@@ -88,7 +89,7 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
         <Card title="Specifications">
           {it.specs.length === 0 && !it.specsNotes ? <Empty>No specifications recorded.</Empty> : (
             <div className="space-y-3">
-              {it.specs.length > 0 && <DL items={it.specs.map((s) => [s.name, s.value] as [string, React.ReactNode])} />}
+              {it.specs.length > 0 && <DL items={groupSpecs(it.specs).map(([n, v]) => [n, v] as [string, React.ReactNode])} />}
               {it.specsNotes && (
                 <div>
                   <div className="label">Notes</div>

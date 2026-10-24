@@ -2,13 +2,15 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { punch, type PunchResponse } from './actions';
+import { breakPunch, punch, type BreakResponse, type PunchResponse } from './actions';
 import { SelfieCamera, type CameraState, type SelfieHandle } from './SelfieCamera';
 import { useGeolocation } from './useGeolocation';
 
 export type KioskEmployee = {
   id: number; name: string; nickname: string | null; position: string;
   timeIn: string | null; timeOut: string | null; leave: boolean;
+  /** Timed in and currently on a break; today's breaks as "10:01 AM–10:14 AM, …". */
+  onBreak: boolean; breaks: string | null;
 };
 
 const TZ = 'Asia/Manila';
@@ -34,13 +36,14 @@ function LiveClock() {
   );
 }
 
-export function ClockKiosk({ employees, requirePhoto, requireLocation }: { employees: KioskEmployee[]; requirePhoto: boolean; requireLocation: boolean }) {
+export function ClockKiosk({ employees, breakSlots, requirePhoto, requireLocation }: { employees: KioskEmployee[]; breakSlots: string[]; requirePhoto: boolean; requireLocation: boolean }) {
   const router = useRouter();
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<KioskEmployee | null>(null);
   const [pin, setPin] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<Extract<PunchResponse, { ok: unknown }>['ok'] | null>(null);
+  const [breakResult, setBreakResult] = useState<Extract<BreakResponse, { ok: unknown }>['ok'] | null>(null);
   const [pending, startTransition] = useTransition();
   const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const camera = useRef<SelfieHandle>(null);
@@ -58,12 +61,31 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
 
   const backToGrid = useCallback(() => {
     if (resetTimer.current) clearTimeout(resetTimer.current);
-    setSelected(null); setPin(''); setError(null); setResult(null); setQ(''); setPhoto(null); setCamState('starting');
+    setSelected(null); setPin(''); setError(null); setResult(null); setBreakResult(null); setQ(''); setPhoto(null); setCamState('starting');
   }, []);
+
+  // Timed in (not out yet): the employee picks Start break / End break or Time out.
+  const isIn = !!selected && !!selected.timeIn && !selected.timeOut && !selected.leave;
+
+  const takeBreak = useCallback(() => {
+    if (!selected || pending) return;
+    if (pin.length < 4) { setError('Enter your 4–6 digit PIN.'); return; }
+    const p = pin;
+    setPin('');
+    startTransition(async () => {
+      const res = await breakPunch(selected.id, p);
+      if ('error' in res) { setError(res.error); return; }
+      setError(null);
+      setBreakResult(res.ok);
+      router.refresh();
+      resetTimer.current = setTimeout(backToGrid, 4000);
+    });
+  }, [selected, pin, pending, router, backToGrid]);
 
   const submit = useCallback(() => {
     if (!selected || pending) return;
     if (pin.length < 4) { setError('Enter your 4–6 digit PIN.'); return; }
+    if (selected.onBreak) { setError('You are on break — tap End break first.'); return; }
     // The selfie is taken right now, at the moment of the punch.
     const shot = camera.current?.capture() ?? null;
     if (requirePhoto && !shot) { setError('A selfie is required. Look at the camera and allow camera access, then press Enter.'); return; }
@@ -93,16 +115,16 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
 
   // Physical keyboard: digits, Backspace, Enter, Escape.
   useEffect(() => {
-    if (!selected || result) return;
+    if (!selected || result || breakResult) return;
     const onKey = (e: KeyboardEvent) => {
       if (/^\d$/.test(e.key)) { e.preventDefault(); press(e.key); }
       else if (e.key === 'Backspace') { e.preventDefault(); setPin((p) => p.slice(0, -1)); }
-      else if (e.key === 'Enter') { e.preventDefault(); submit(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (selected.onBreak) takeBreak(); else if (isIn) setError('Tap Start break or Time out.'); else submit(); }
       else if (e.key === 'Escape') { e.preventDefault(); backToGrid(); }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selected, result, press, submit, backToGrid]);
+  }, [selected, result, breakResult, isIn, press, submit, takeBreak, backToGrid]);
 
   useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
@@ -112,7 +134,20 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
         <LiveClock />
       </div>
 
-      {result ? (
+      {breakResult ? (
+        <button type="button" onClick={backToGrid} className="block w-full rounded-md bg-amber-500 px-6 py-10 text-center text-white shadow-panel">
+          <div className="text-[13px] font-semibold uppercase tracking-[0.12em] opacity-90">{breakResult.action === 'BREAK_START' ? 'Break started' : 'Break ended'}</div>
+          <div className="mt-2 text-[28px] font-semibold sm:text-[36px]">{breakResult.name}</div>
+          <div className="mt-3 font-mono text-[48px] font-semibold leading-none tabular-nums sm:text-[64px]">{breakResult.time}</div>
+          {breakResult.action === 'BREAK_START' && breakResult.slot && <div className="mt-4 text-[16px] font-semibold">Break time: {breakResult.slot}</div>}
+          {breakResult.action === 'BREAK_END' && (
+            <div className="mt-4 inline-block rounded bg-white/20 px-3 py-1 text-[16px] font-semibold">
+              {breakResult.minutes} min break{breakResult.overMinutes > 0 ? ` · ${breakResult.overMinutes} min over` : ''}
+            </div>
+          )}
+          <div className="mt-5 text-[12px] opacity-80">Tap to continue</div>
+        </button>
+      ) : result ? (
         <button
           type="button"
           onClick={backToGrid}
@@ -155,6 +190,8 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
             <div className="text-[11px] font-semibold uppercase tracking-[0.1em] text-slate-500">Enter PIN for</div>
             <div className="mt-1 text-[22px] font-semibold">{selected.name}</div>
             <div className="text-[13px] text-slate-500">{selected.position}</div>
+            {isIn && <div className={`mt-1 text-[12.5px] font-semibold ${selected.onBreak ? 'text-amber-600' : 'text-emerald-700'}`}>{selected.onBreak ? 'On break now' : `Timed in ${selected.timeIn}`}</div>}
+            {isIn && breakSlots.length > 0 && <div className="mt-0.5 text-[11.5px] text-slate-500">Breaks: {breakSlots.join(' · ')}</div>}
           </div>
           <div className="my-5 flex h-8 items-center justify-center gap-3" aria-label={`${pin.length} digits entered`}>
             {Array.from({ length: Math.max(4, pin.length) }).map((_, i) => (
@@ -177,11 +214,27 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
               className="h-16 rounded-md border border-slate-300 bg-white font-mono text-[26px] font-semibold shadow-panel active:bg-slate-100 disabled:opacity-50">
               0
             </button>
-            <button type="button" disabled={pending || pin.length < 4 || cameraBlocksPunch} onClick={submit}
-              className="h-16 rounded-md bg-brand-600 text-[15px] font-semibold uppercase tracking-wide text-white active:bg-brand-800 disabled:opacity-50">
-              {pending ? '…' : 'Enter'}
-            </button>
+            {isIn ? <div /> : (
+              <button type="button" disabled={pending || pin.length < 4 || cameraBlocksPunch} onClick={submit}
+                className="h-16 rounded-md bg-brand-600 text-[15px] font-semibold uppercase tracking-wide text-white active:bg-brand-800 disabled:opacity-50">
+                {pending ? '…' : 'Time in'}
+              </button>
+            )}
           </div>
+          {isIn && (
+            <div className={`mt-2 grid gap-2 ${selected.onBreak ? 'grid-cols-1' : 'grid-cols-2'}`}>
+              <button type="button" disabled={pending || pin.length < 4} onClick={takeBreak}
+                className="h-14 rounded-md bg-amber-500 text-[15px] font-semibold uppercase tracking-wide text-white active:bg-amber-600 disabled:opacity-50">
+                {pending ? '…' : selected.onBreak ? 'End break' : 'Start break'}
+              </button>
+              {!selected.onBreak && (
+                <button type="button" disabled={pending || pin.length < 4 || cameraBlocksPunch} onClick={submit}
+                  className="h-14 rounded-md bg-graphite-800 text-[15px] font-semibold uppercase tracking-wide text-white active:bg-black disabled:opacity-50">
+                  {pending ? '…' : 'Time out'}
+                </button>
+              )}
+            </div>
+          )}
           <button type="button" onClick={backToGrid} className="btn-secondary mt-4 w-full">Cancel</button>
           </div>
         </div>
@@ -200,7 +253,7 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {filtered.map((e) => {
-                const status = e.leave ? 'On leave' : e.timeOut ? 'Out' : e.timeIn ? 'In' : null;
+                const status = e.leave ? 'On leave' : e.timeOut ? 'Out' : e.onBreak ? 'On break' : e.timeIn ? 'In' : null;
                 return (
                   <button key={e.id} type="button" onClick={() => { setSelected(e); setPin(''); setError(null); }}
                     className="card flex min-h-[96px] flex-col items-start justify-between p-4 text-left transition hover:border-brand-500 active:bg-brand-50">
@@ -209,7 +262,7 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
                       <div className="mt-0.5 text-[12.5px] text-slate-500">{e.position}</div>
                     </div>
                     {status && (
-                      <span className={`mt-2 text-[11px] font-semibold uppercase tracking-wide ${status === 'In' ? 'text-emerald-700' : 'text-slate-500'}`}>{status}</span>
+                      <span className={`mt-2 text-[11px] font-semibold uppercase tracking-wide ${status === 'In' ? 'text-emerald-700' : status === 'On break' ? 'text-amber-600' : 'text-slate-500'}`}>{status}</span>
                     )}
                   </button>
                 );
@@ -227,12 +280,13 @@ export function ClockKiosk({ employees, requirePhoto, requireLocation }: { emplo
         </div>
         <div className="overflow-x-auto">
           <table className="table">
-            <thead><tr><th>Employee</th><th className="text-right">Time in</th><th className="text-right">Time out</th></tr></thead>
+            <thead><tr><th>Employee</th><th className="text-right">Time in</th><th>Breaks</th><th className="text-right">Time out</th></tr></thead>
             <tbody>
               {employees.map((e) => (
                 <tr key={e.id}>
                   <td>{e.name}</td>
                   <td className="text-right whitespace-nowrap">{e.leave ? 'Paid leave' : e.timeIn ?? '—'}</td>
+                  <td className="text-[12px] text-slate-600">{e.breaks ?? '—'}</td>
                   <td className="text-right whitespace-nowrap">{e.leave ? '' : e.timeOut ?? '—'}</td>
                 </tr>
               ))}

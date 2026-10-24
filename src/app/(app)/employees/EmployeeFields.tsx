@@ -13,6 +13,8 @@ export type EmployeeFormValues = {
   mobile: string; email: string; address: string; birthDate: string; hireDate: string;
   status: string; endDate: string; payType: string; rate: string; payFrequency: string;
   shiftStart: string; shiftEnd: string; breakMinutes: number; workDays: string;
+  /** "" = use the shop default grace period. */
+  lateGraceMinutes: string;
   sssNo: string; philhealthNo: string; pagibigNo: string; tin: string;
   emergencyContact: string; emergencyPhone: string; notes: string; userId: number | null;
 };
@@ -22,7 +24,7 @@ export type LinkableUser = { id: number; name: string; username: string; role: s
 export const BLANK_EMPLOYEE: EmployeeFormValues = {
   firstName: '', lastName: '', middleName: '', nickname: '', position: '', mobile: '', email: '', address: '',
   birthDate: '', hireDate: '', status: 'ACTIVE', endDate: '', payType: 'DAILY', rate: '', payFrequency: 'SEMI_MONTHLY',
-  shiftStart: '08:00', shiftEnd: '17:00', breakMinutes: 60, workDays: '1,2,3,4,5,6',
+  shiftStart: '08:00', shiftEnd: '17:00', breakMinutes: 90, workDays: '1,2,3,4,5,6', lateGraceMinutes: '',
   sssNo: '', philhealthNo: '', pagibigNo: '', tin: '', emergencyContact: '', emergencyPhone: '', notes: '', userId: null,
 };
 
@@ -55,12 +57,12 @@ export function EmployeeFields({ e: given, users, recomputeFrom, mode = 'edit', 
   const e: EmployeeFormValues = { ...BLANK_EMPLOYEE, ...given };
   const [status, setStatus] = useState(e.status);
   const [payType, setPayType] = useState(e.payType);
-  const [sched, setSched] = useState({ shiftStart: e.shiftStart, shiftEnd: e.shiftEnd, breakMinutes: String(e.breakMinutes) });
+  const [sched, setSched] = useState({ shiftStart: e.shiftStart, shiftEnd: e.shiftEnd, breakMinutes: String(e.breakMinutes), grace: e.lateGraceMinutes });
   const [days, setDays] = useState<number[]>(workDayNumbers(e.workDays));
   const separated = status === 'RESIGNED' || status === 'TERMINATED';
 
   const scheduleChanged = recomputeFrom !== undefined && (
-    sched.shiftStart !== e.shiftStart || sched.shiftEnd !== e.shiftEnd || sched.breakMinutes !== String(e.breakMinutes)
+    sched.shiftStart !== e.shiftStart || sched.shiftEnd !== e.shiftEnd || sched.breakMinutes !== String(e.breakMinutes) || sched.grace !== e.lateGraceMinutes
     || [...days].sort((a, b) => a - b).join(',') !== workDayNumbers(e.workDays).join(','));
 
   const toggleDay = (d: number) => setDays((cur) => (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]));
@@ -106,7 +108,7 @@ export function EmployeeFields({ e: given, users, recomputeFrom, mode = 'edit', 
       </Section>
 
       <Section title="Work schedule">
-        <div className="grid grid-cols-3 gap-3 sm:col-span-2">
+        <div className="grid grid-cols-2 gap-3 sm:col-span-2 sm:grid-cols-4">
           <Field label="Shift start *">
             <input name="shiftStart" type="time" required value={sched.shiftStart} onChange={(ev) => setSched({ ...sched, shiftStart: ev.target.value })} className="input" />
           </Field>
@@ -115,6 +117,9 @@ export function EmployeeFields({ e: given, users, recomputeFrom, mode = 'edit', 
           </Field>
           <Field label="Break (min)">
             <input name="breakMinutes" type="number" min={0} step={1} value={sched.breakMinutes} onChange={(ev) => setSched({ ...sched, breakMinutes: ev.target.value })} className="input num" />
+          </Field>
+          <Field label="Late grace (min)" hint="Minutes after shift start still on time. Empty = shop default (Settings).">
+            <input name="lateGraceMinutes" type="number" min={0} max={120} step={1} value={sched.grace} onChange={(ev) => setSched({ ...sched, grace: ev.target.value })} placeholder="Shop default" className="input num" />
           </Field>
         </div>
         <div className="sm:col-span-2">

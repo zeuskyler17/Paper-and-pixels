@@ -4,7 +4,7 @@ import type { DayType, Employee, TimeSource } from '@prisma/client';
 import { prisma, type Tx } from './db';
 import { getSettings } from './settings';
 import { parseDateInput, toDateInput, todayManila } from './dates';
-import { computeEntry, dayTypeFor, fmtClock } from './timekeeping';
+import { computeEntry, dayTypeFor, fmtClock, fmtSlot, overbreakMinutes, parseBreakSchedule } from './timekeeping';
 
 export function employeeName(e: Pick<Employee, 'firstName' | 'lastName' | 'nickname'>, withNick = false) {
   return `${e.firstName} ${e.lastName}${withNick && e.nickname ? ` (${e.nickname})` : ''}`;
@@ -22,6 +22,20 @@ export async function nextEmployeeNo(tx: Tx): Promise<string> {
 export async function graceMinutes(): Promise<number> {
   const n = Number((await getSettings()).late_grace_minutes);
   return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/** The employee's own grace period when set, otherwise the shop default. */
+export function graceFor(employee: Pick<Employee, 'lateGraceMinutes'>, shopGrace: number): number {
+  return employee.lateGraceMinutes != null && employee.lateGraceMinutes >= 0 ? employee.lateGraceMinutes : shopGrace;
+}
+
+/** Over-break minutes of an entry from its break punches and the shop's break schedule. */
+async function entryOverbreak(tx: Tx, employee: Employee, entryId: number | null, workDate: Date, timeOut: Date | null) {
+  if (!entryId) return 0;
+  const breaks = await tx.timeBreak.findMany({ where: { entryId }, select: { startAt: true, endAt: true } });
+  if (breaks.length === 0) return 0;
+  const slots = parseBreakSchedule((await getSettings()).break_schedule);
+  return overbreakMinutes(workDate, breaks, slots, employee.breakMinutes, timeOut);
 }
 
 export async function holidayOn(db: Tx | typeof prisma, dateStr: string) {
@@ -47,9 +61,10 @@ export async function upsertTimeEntry(tx: Tx, employee: Employee, dateStr: strin
   const timeOut = f.timeOut !== undefined ? f.timeOut : existing?.timeOut ?? null;
   const breakMinutes = f.breakMinutes ?? existing?.breakMinutes ?? employee.breakMinutes;
   if (timeIn && timeOut && timeOut <= timeIn) throw new Error('Time out must be after time in.');
-  const minutes = computeEntry(employee, { workDate, timeIn, timeOut, breakMinutes, dayType }, grace ?? (await graceMinutes()));
+  const overbreak = await entryOverbreak(tx, employee, existing?.id ?? null, workDate, timeOut);
+  const minutes = computeEntry(employee, { workDate, timeIn, timeOut, breakMinutes, dayType, overbreakMinutes: overbreak }, graceFor(employee, grace ?? (await graceMinutes())));
   const data = {
-    timeIn, timeOut, breakMinutes, dayType, ...minutes,
+    timeIn, timeOut, breakMinutes, dayType, ...minutes, overbreakMinutes: overbreak,
     otApproved: f.otApproved ?? existing?.otApproved ?? false,
     notes: f.notes !== undefined ? f.notes : existing?.notes ?? null,
   };
@@ -61,8 +76,9 @@ export async function upsertTimeEntry(tx: Tx, employee: Employee, dateStr: strin
 /** Recompute the stored minutes of an existing entry (e.g. after a schedule change). */
 export async function recomputeEntry(tx: Tx, employee: Employee, entryId: number, grace: number) {
   const e = await tx.timeEntry.findUniqueOrThrow({ where: { id: entryId } });
-  const minutes = computeEntry(employee, e, grace);
-  return tx.timeEntry.update({ where: { id: e.id }, data: minutes });
+  const overbreak = await entryOverbreak(tx, employee, e.id, e.workDate, e.timeOut);
+  const minutes = computeEntry(employee, { ...e, overbreakMinutes: overbreak }, graceFor(employee, grace));
+  return tx.timeEntry.update({ where: { id: e.id }, data: { ...minutes, overbreakMinutes: overbreak } });
 }
 
 /** Verify a time-clock PIN. Locks the employee's PIN for 5 minutes after 5 wrong tries. */
@@ -107,6 +123,8 @@ export async function clockPunch(tx: Tx, emp: Employee, userId: number | null): 
     const sinceIn = now.getTime() - open.timeIn.getTime();
     if (sinceIn < 60_000) throw new Error(`${name}: already timed in at ${fmtClock(open.timeIn)}.`);
     if (toDateInput(open.workDate) === today || sinceIn < 16 * 3_600_000) {
+      // Timing out while on break ends the break at the same moment.
+      await tx.timeBreak.updateMany({ where: { entryId: open.id, endAt: null }, data: { endAt: now, endByUserId: userId } });
       const e = await upsertTimeEntry(tx, emp, toDateInput(open.workDate), { timeOut: now, source: 'CLOCK', userId }, grace);
       return { action: 'OUT', at: now, name, workDate: toDateInput(open.workDate), lateMinutes: e.lateMinutes };
     }
@@ -119,4 +137,44 @@ export async function clockPunch(tx: Tx, emp: Employee, userId: number | null): 
   if (todayEntry?.dayType === 'PAID_LEAVE') throw new Error(`${name}: today is marked as paid leave. Ask the admin to change it first.`);
   const e = await upsertTimeEntry(tx, emp, today, { timeIn: now, source: 'CLOCK', userId }, grace);
   return { action: 'IN', at: now, name, workDate: today, lateMinutes: e.lateMinutes };
+}
+
+export type BreakResult = { action: 'BREAK_START' | 'BREAK_END'; at: Date; name: string; minutes: number; overMinutes: number; slot: string | null };
+
+/**
+ * Time-clock break punch: starts a break, or ends the open one. Needs an open time-in (today, or an overnight shift).
+ * The entry's minutes are recomputed so over-break shows as undertime right away.
+ */
+export async function clockBreak(tx: Tx, emp: Employee, userId: number | null, deviceId: string | null): Promise<BreakResult> {
+  const now = new Date();
+  const today = todayManila();
+  const name = employeeName(emp);
+  const open = await tx.timeEntry.findFirst({
+    where: { employeeId: emp.id, timeIn: { not: null }, timeOut: null, workDate: { gte: new Date(parseDateInput(today)!.getTime() - 86_400_000) } },
+    orderBy: { workDate: 'desc' },
+  });
+  if (!open?.timeIn || (toDateInput(open.workDate) !== today && now.getTime() - open.timeIn.getTime() >= 16 * 3_600_000)) {
+    throw new Error(`${name}: time in first before taking a break.`);
+  }
+  const onBreak = await tx.timeBreak.findFirst({ where: { entryId: open.id, endAt: null }, orderBy: { startAt: 'desc' } });
+  const slots = parseBreakSchedule((await getSettings()).break_schedule);
+  const slotOf = (at: Date) => {
+    const m = Math.round((at.getTime() - open.workDate.getTime()) / 60_000);
+    let best: (typeof slots)[number] | null = null, dist = Infinity;
+    for (const sl of slots) { const d = m < sl.start ? sl.start - m : m > sl.end ? m - sl.end : 0; if (d < dist) { dist = d; best = sl; } }
+    return best;
+  };
+  if (onBreak) {
+    if (now.getTime() - onBreak.startAt.getTime() < 30_000) throw new Error(`${name}: break started just now at ${fmtClock(onBreak.startAt)}.`);
+    await tx.timeBreak.update({ where: { id: onBreak.id }, data: { endAt: now, endByUserId: userId } });
+    await recomputeEntry(tx, emp, open.id, await graceMinutes());
+    const minutes = Math.round((now.getTime() - onBreak.startAt.getTime()) / 60_000);
+    const sl = slotOf(onBreak.startAt);
+    const allowed = sl ? sl.end - sl.start : emp.breakMinutes;
+    return { action: 'BREAK_END', at: now, name, minutes, overMinutes: Math.max(0, minutes - allowed), slot: sl ? fmtSlot(sl) : null };
+  }
+  if ((await tx.timeBreak.count({ where: { entryId: open.id } })) >= 8) throw new Error(`${name}: too many breaks today. Ask the admin.`);
+  await tx.timeBreak.create({ data: { entryId: open.id, startAt: now, startByUserId: userId, deviceId } });
+  const sl = slotOf(now);
+  return { action: 'BREAK_START', at: now, name, minutes: 0, overMinutes: 0, slot: sl ? fmtSlot(sl) : null };
 }

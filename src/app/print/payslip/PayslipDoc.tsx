@@ -1,4 +1,4 @@
-// Printable payslip (A5 portrait). Shared by /print/payslip/[id] and /print/payroll/[id]/payslips.
+// Printable payslip (half-letter landscape, 8.5 × 5.5 in). Shared by /print/payslip/[id] and /print/payroll/[id]/payslips.
 import type { Prisma } from '@prisma/client';
 import { peso } from '@/lib/money';
 import { fmtDate } from '@/lib/dates';
@@ -16,8 +16,8 @@ export const PAYSLIP_INCLUDE = {
 export type PayslipForPrint = Prisma.PayslipGetPayload<{ include: typeof PAYSLIP_INCLUDE }>;
 
 export const PAYSLIP_PAGE_CSS = `
-  @page { size: A5; margin: 8mm; }
-  .slip { width: 148mm; min-height: 210mm; position: relative; overflow: hidden; }
+  @page { size: 8.5in 5.5in; margin: 8mm; }
+  .slip { width: 8.5in; min-height: 5.5in; position: relative; overflow: hidden; }
   .slip + .slip { margin-top: 6mm; }
   .watermark { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; }
   .watermark span { transform: rotate(-30deg); font-size: 44px; font-weight: 800; letter-spacing: 0.08em; color: rgba(0,0,0,0.12); white-space: nowrap; border: 4px solid rgba(0,0,0,0.12); padding: 4px 14px; }

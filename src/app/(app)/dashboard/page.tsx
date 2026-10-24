@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { prisma } from '@/lib/db';
 import { requireUser, can } from '@/lib/auth';
+import { ReleaseOrderButton } from '@/components/ReleaseOrderButton';
 import { customerBalances } from '@/lib/orders';
 import { fmtQty, peso } from '@/lib/money';
 import { daysBetween, fmtDate, manilaDayRange, startOfMonthManila } from '@/lib/dates';
@@ -73,7 +74,7 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
       orderBy: { completedAt: 'desc' },
       take: 15,
       include: {
-        order: { select: { id: true, orderNo: true, balance: true, customer: { select: { name: true } } } },
+        order: { select: { id: true, orderNo: true, balance: true, customerId: true, customer: { select: { name: true } }, jobs: { select: { status: true } } } },
         orderItem: { select: { description: true, quantity: true } },
         assignedTo: { select: { name: true } },
       },
@@ -81,7 +82,9 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
   ]);
 
   const cashToday = cashByMethod.reduce((s, r) => s + (r._sum.amount ?? 0), 0);
-  const topOwing = [...balances.entries()].filter(([, b]) => b.balance > 0).sort((a, b) => b[1].balance - a[1].balance).slice(0, 10);
+  // Customers whose balance the owner hid are left out for non-admin logins.
+  const hiddenIds = user.isAdmin ? new Set<number>() : new Set((await prisma.customer.findMany({ where: { balanceHidden: true }, select: { id: true } })).map((c) => c.id));
+  const topOwing = [...balances.entries()].filter(([id, b]) => b.balance > 0 && !hiddenIds.has(id)).sort((a, b) => b[1].balance - a[1].balance).slice(0, 10);
   const owingCustomers = topOwing.length
     ? await prisma.customer.findMany({ where: { id: { in: topOwing.map(([id]) => id) } }, select: { id: true, name: true, mobile: true } })
     : [];
@@ -203,9 +206,15 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
                   </div>
                   <div className="text-right">
                     <div className="text-xs text-slate-500">done {fmtDate(j.completedAt)}</div>
-                    {j.order.balance > 0
+                    {j.order.balance > 0 && hiddenIds.has(j.order.customerId)
+                      ? null
+                      : j.order.balance > 0
                       ? <div className="text-xs font-medium text-red-600">balance {peso(j.order.balance)}</div>
                       : <div className="text-xs font-medium text-emerald-600">paid</div>}
+                    {can(user, 'orders') && (
+                      <ReleaseOrderButton orderId={j.order.id} orderNo={j.order.orderNo} balance={j.order.balance} hideAmount={hiddenIds.has(j.order.customerId)}
+                        ready={j.order.jobs.every((x) => x.status === 'COMPLETED' || x.status === 'CANCELLED')} className="mt-1 flex justify-end" />
+                    )}
                   </div>
                 </li>
               ))}

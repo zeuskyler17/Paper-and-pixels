@@ -38,7 +38,7 @@ export function DtrTable({ rows, editHref, showPhotos = false, shop = null, flag
       <table className="table">
         <thead>
           <tr>
-            <th>Date</th><th>Day type</th><th className="text-right">In</th><th className="text-right">Out</th>
+            <th>Date</th><th>Day type</th><th className="text-right">In</th><th>Breaks</th><th className="text-right">Out</th>
             <th className="text-right">Late</th><th className="text-right">Undertime</th><th className="text-right">Regular</th>
             <th className="text-right">OT</th><th>Status</th>{editHref && <th />}
           </tr>
@@ -57,6 +57,10 @@ export function DtrTable({ rows, editHref, showPhotos = false, shop = null, flag
                   {r.holiday && <div className="text-[11px] text-slate-500">{r.holiday.name}</div>}
                 </td>
                 <td className="text-right whitespace-nowrap">{fmtClock(e?.timeIn)}{showPhotos && <><Selfie photoId={e?.timeInPhotoId} time={e?.timeIn} source={e?.source} /><Pin lat={e?.timeInLat} lng={e?.timeInLng} accuracy={e?.timeInAccuracy} time={e?.timeIn} source={e?.source} shop={shop} /><Flag reasons={e ? flags?.get(e.id)?.in : undefined} cleared={e ? flags?.get(e.id)?.cleared : undefined} /></>}</td>
+                <td className="text-[11.5px] leading-tight text-slate-600">
+                  {e?.breaks.length ? e.breaks.map((b, i) => <div key={i} className="whitespace-nowrap">{fmtClock(b.startAt)}–{b.endAt ? fmtClock(b.endAt) : '…'}</div>) : <span className="text-slate-400">—</span>}
+                  {!!e?.overbreakMinutes && <div className="font-semibold text-amber-700">{fmtMinutes(e.overbreakMinutes)} over</div>}
+                </td>
                 <td className="text-right whitespace-nowrap"><TimeOutCell date={r.date} timeOut={e?.timeOut ?? null} />{showPhotos && <><Selfie photoId={e?.timeOutPhotoId} time={e?.timeOut} source={e?.source} /><Pin lat={e?.timeOutLat} lng={e?.timeOutLng} accuracy={e?.timeOutAccuracy} time={e?.timeOut} source={e?.source} shop={shop} /><Flag reasons={e ? flags?.get(e.id)?.out : undefined} cleared={e ? flags?.get(e.id)?.cleared : undefined} /></>}</td>
                 <td className={`text-right whitespace-nowrap ${e?.lateMinutes ? 'text-amber-700' : ''}`}>{fmtMinutes(e?.lateMinutes ?? 0)}</td>
                 <td className={`text-right whitespace-nowrap ${e?.undertimeMinutes ? 'text-amber-700' : ''}`}>{fmtMinutes(e?.undertimeMinutes ?? 0)}</td>

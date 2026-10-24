@@ -11,8 +11,10 @@ import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { Badge, Card, DL, Empty, Field, PageHeader, Select, StatusBadge, TableWrap } from '@/components/ui';
 import { addPayment, cancelOrder, markDelivered, setOrderStatus, updateOrderHeader, voidPayment } from '../actions';
 import { DiscountFields } from './DiscountFields';
+import { getPointsConfig } from '@/lib/points';
 import { PaymentMethodFields } from '@/components/PaymentMethodFields';
 import { accountLabel } from '@/lib/paymentAccounts';
+import { groupSpecs } from '@/lib/pricing';
 
 export default async function OrderPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requireUser('orders');
@@ -30,6 +32,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
     },
   });
   if (!order) notFound();
+  const pointsOn = (await getPointsConfig()).enabled;
   const accounts = await prisma.paymentAccount.findMany({
     where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { label: 'asc' }],
     select: { id: true, method: true, label: true, accountNumber: true },
@@ -88,6 +91,8 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             <Row k="Subtotal" v={peso(order.subtotal)} />
             {order.discount > 0 && <Row k={`Discount${order.discountReason ? ` (${order.discountReason})` : ''}`} v={`−${peso(order.discount)}`} />}
             {order.discount > 0 && <p className="-mt-1 text-right text-xs text-slate-500">{order.discountApprovedBy ? `approved by ${order.discountApprovedBy.name}` : 'no approval recorded'}</p>}
+            {order.pointsAmount > 0 && <Row k={`Points used (${order.pointsUsed})`} v={`−${peso(order.pointsAmount)}`} />}
+            {pointsOn && !order.earnsPoints && <p className="text-right text-[11px] text-slate-500">Special customer discount — this order earns no points.</p>}
             <Row k="Total" v={peso(order.total)} bold />
             <Row k="Paid" v={peso(order.amountPaid)} />
             <Row k="Balance" v={peso(order.balance)} bold tone={order.balance > 0 ? 'text-red-600' : 'text-emerald-600'} />
@@ -108,7 +113,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                     {it.fileSource !== 'NONE' && <div className="text-xs text-slate-500">Files: {FILE_SOURCE[it.fileSource]}{it.fileSourceNote ? ` — ${it.fileSourceNote}` : ''}</div>}
                   </td>
                   <td className="min-w-[12rem] text-xs">
-                    {it.specs.map((s) => <div key={s.id}><span className="text-slate-500">{s.name}:</span> {s.value}</div>)}
+                    {groupSpecs(it.specs).map(([n, v]) => <div key={n}><span className="text-slate-500">{n}:</span> {v}</div>)}
                     {it.specsNotes && <div className="mt-1 whitespace-pre-line text-slate-700">{it.specsNotes}</div>}
                     {it.specs.length === 0 && !it.specsNotes && '—'}
                   </td>
@@ -229,7 +234,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                 <DiscountFields subtotal={order.subtotal} discount={order.discount} reason={order.discountReason} approvedBy={order.discountApprovedBy?.name} />
                 <Field label="Notes" className="sm:col-span-2"><textarea name="notes" defaultValue={order.notes ?? ''} rows={2} className="input" /></Field>
               </div>
-              <p className="mt-2 text-xs text-slate-500">Total = subtotal {peso(order.subtotal)} − discount. Changing the target date also moves the due date of unfinished jobs.</p>
+              <p className="mt-2 text-xs text-slate-500">Total = subtotal {peso(order.subtotal)} − discount{order.pointsAmount > 0 ? ` − points ${peso(order.pointsAmount)}` : ''}. Changing the target date also moves the due date of unfinished jobs.</p>
               <div className="mt-3"><SubmitButton>Save changes</SubmitButton></div>
             </ActionForm>
           </Card>

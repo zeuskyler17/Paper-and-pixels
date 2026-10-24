@@ -414,7 +414,7 @@ If the router gives the Mac a new IP, phones use the new address (or `https://<m
 | `Can't reach database server` / `P1001` | Is Postgres running (Postgres.app elephant icon / `systemctl status postgresql`)? Is `DATABASE_URL` correct? Cloud databases need `?sslmode=require`. |
 | `The table "public.users" does not exist` | Run `npx prisma migrate deploy`. |
 | Login says wrong username or password on a new install | Run `npx prisma db seed`; usernames are lowercase. |
-| Forgot the admin password | Another admin can reset it under **Users**. If you are the only admin: generate a hash with `node -e "require('bcryptjs').hash('newpass123',10).then(console.log)"`, open `npx prisma studio`, paste it into that user's `passwordHash`, save, then log in and change the password. |
+| Forgot the admin password | Another admin can reset it under **Employees & Users → Logins**. If you are the only admin, run `./scripts/reset-password.sh` in Terminal on this Mac: pick the branch, the login (default `admin`), and type the new password twice (hidden). It re-activates the login and writes an audit-log line; nothing else changes. |
 | `@prisma/client did not initialize yet` | Run `npx prisma generate` (it also runs automatically after `npm install`). |
 | Order slip / receipt prints on the wrong paper size | In the print dialog choose the correct paper and set margins to "None"/"Default", scale 100%. |
 | Photos won't upload | Very large files are resized on the phone first; if it still fails check the internet connection and that the file is an image. |

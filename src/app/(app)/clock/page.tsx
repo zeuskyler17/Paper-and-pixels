@@ -3,7 +3,7 @@ import { requireUser } from '@/lib/auth';
 import { parseDateInput, todayManila } from '@/lib/dates';
 import { employeeName } from '@/lib/hr';
 import { getSettings } from '@/lib/settings';
-import { fmtClock } from '@/lib/timekeeping';
+import { fmtClock, fmtSlot, parseBreakSchedule } from '@/lib/timekeeping';
 import { ClockKiosk, type KioskEmployee } from './ClockKiosk';
 
 export const metadata = { title: 'Time clock' };
@@ -21,7 +21,7 @@ export default async function ClockPage() {
     orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
     select: {
       id: true, firstName: true, lastName: true, nickname: true, position: true,
-      timeEntries: { where: { workDate: { gte: yesterday } }, select: { workDate: true, timeIn: true, timeOut: true, dayType: true } },
+      timeEntries: { where: { workDate: { gte: yesterday } }, select: { workDate: true, timeIn: true, timeOut: true, dayType: true, breaks: { orderBy: { startAt: 'asc' }, select: { startAt: true, endAt: true } } } },
     },
   });
 
@@ -39,9 +39,12 @@ export default async function ClockPage() {
       timeIn: shown?.timeIn ? `${fmtClock(shown.timeIn)}${shown === y ? ' (yesterday)' : ''}` : null,
       timeOut: shown?.timeOut ? fmtClock(shown.timeOut) : null,
       leave: t?.dayType === 'PAID_LEAVE',
+      onBreak: !!shown && !shown.timeOut && shown.breaks.some((b) => !b.endAt),
+      breaks: (shown?.breaks ?? []).map((b) => `${fmtClock(b.startAt)}–${b.endAt ? fmtClock(b.endAt) : '…'}`).join(', ') || null,
     };
   });
 
   const settings = await getSettings();
-  return <ClockKiosk employees={list} requirePhoto={settings.clock_require_photo !== 'false'} requireLocation={settings.clock_require_location !== 'false'} />;
+  const slots = parseBreakSchedule(settings.break_schedule).map(fmtSlot);
+  return <ClockKiosk employees={list} breakSlots={slots} requirePhoto={settings.clock_require_photo !== 'false'} requireLocation={settings.clock_require_location !== 'false'} />;
 }

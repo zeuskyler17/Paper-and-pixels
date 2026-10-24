@@ -32,12 +32,12 @@ export default async function PrintDtrPage({ searchParams }: { searchParams: SP 
   return (
     <>
       <style>{`
-        @page { size: A4 portrait; margin: 12mm; }
-        .dtr { width: 210mm; min-height: 297mm; }
+        @page { size: 8.5in 5.5in; margin: 8mm; }
+        .dtr { width: 8.5in; min-height: 5.5in; }
         .dtr td, .dtr th { padding: 2px 4px; }
         @media print { .dtr { width: auto; min-height: 0; box-shadow: none !important; padding: 0 !important; } }
       `}</style>
-      <div className="dtr mx-auto max-w-full bg-white p-[12mm] text-[10.5px] leading-snug text-black shadow">
+      <div className="dtr mx-auto max-w-full bg-white p-[8mm] text-[10px] leading-snug text-black shadow">
         <header className="flex items-start justify-between gap-3 border-b-2 border-black pb-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo.png" alt="" width={56} height={56} className="h-14 w-14 shrink-0" />
@@ -65,7 +65,7 @@ export default async function PrintDtrPage({ searchParams }: { searchParams: SP 
           <thead>
             <tr className="border-b border-black text-left">
               <th>Date</th><th>Day</th><th>Day type</th>
-              <th className="text-right">Time in</th><th className="text-right">Time out</th>
+              <th className="text-right">Time in</th><th>Breaks</th><th className="text-right">Time out</th>
               <th className="text-right">Late</th><th className="text-right">Undertime</th>
               <th className="text-right">Reg. hrs</th><th className="text-right">OT</th><th>Remarks</th>
             </tr>
@@ -82,6 +82,7 @@ export default async function PrintDtrPage({ searchParams }: { searchParams: SP 
                   <td>{r.weekday}</td>
                   <td className="whitespace-nowrap">{SHORT_DAY[r.dayType]}</td>
                   <td className="text-right whitespace-nowrap">{e?.timeIn ? fmtClock(e.timeIn) : ''}</td>
+                  <td className="text-[8.5px] leading-tight">{e?.breaks.map((b) => `${fmtClock(b.startAt)}–${b.endAt ? fmtClock(b.endAt) : '…'}`).join(', ')}{e?.overbreakMinutes ? <b> ({fmtMinutes(e.overbreakMinutes)} over)</b> : null}</td>
                   <td className="text-right whitespace-nowrap">{e?.timeOut ? `${fmtClock(e.timeOut)}${nextDay ? ' +1' : ''}` : ''}</td>
                   <td className="text-right">{e?.lateMinutes ? fmtMinutes(e.lateMinutes) : ''}</td>
                   <td className="text-right">{e?.undertimeMinutes ? fmtMinutes(e.undertimeMinutes) : ''}</td>
@@ -94,7 +95,7 @@ export default async function PrintDtrPage({ searchParams }: { searchParams: SP 
           </tbody>
           <tfoot>
             <tr className="border-t-2 border-black font-semibold">
-              <td colSpan={5}>TOTAL — {totals.present} day(s) present{totals.paidLeave ? `, ${totals.paidLeave} paid leave` : ''}, {totals.absent} absent</td>
+              <td colSpan={6}>TOTAL — {totals.present} day(s) present{totals.paidLeave ? `, ${totals.paidLeave} paid leave` : ''}, {totals.absent} absent</td>
               <td className="text-right">{fmtMinutes(totals.lateMinutes)}</td>
               <td className="text-right">{fmtMinutes(totals.undertimeMinutes)}</td>
               <td className="text-right">{(totals.regularMinutes / 60).toFixed(2)}</td>

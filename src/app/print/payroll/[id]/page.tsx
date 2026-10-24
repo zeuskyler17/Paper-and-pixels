@@ -47,12 +47,12 @@ export default async function PrintPayrollRegisterPage({ params }: { params: Pro
   return (
     <>
       <style>{`
-        @page { size: A4 landscape; margin: 10mm; }
-        .register { width: 297mm; min-height: 210mm; }
+        @page { size: 8.5in 5.5in; margin: 6mm; }
+        .register { width: 8.5in; min-height: 5.5in; }
         .register td, .register th { padding: 3px 4px; }
         @media print { .register { width: auto; min-height: 0; box-shadow: none !important; padding: 0 !important; } }
       `}</style>
-      <div className="register mx-auto max-w-full overflow-x-auto bg-white p-[10mm] text-[10.5px] leading-snug text-black shadow">
+      <div className="register mx-auto max-w-full overflow-x-auto bg-white p-[6mm] text-[8.5px] leading-snug text-black shadow">
         <header className="flex items-start justify-between gap-3 border-b-2 border-black pb-2">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo.png" alt="" width={48} height={48} className="h-12 w-12 shrink-0" />

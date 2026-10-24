@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { computeUnitPrice, type Selection } from '@/lib/pricing';
+import { applySpecialPrice, computeUnitPrice, type Selection } from '@/lib/pricing';
 import { centavosToInput, peso, toCentavos, toCentavosOrZero } from '@/lib/money';
 import { FILE_SOURCE, PAYMENT_METHOD, PAYMENT_TERMS, options } from '@/lib/labels';
 import type { CreateOrderInput, PosCustomer, PosProduct } from '../_lib';
@@ -40,7 +40,7 @@ function defaultSelection(p: PosProduct): Line['selection'] {
   return s;
 }
 
-export function PosForm({ products, initialCustomer, today, accounts = [] }: { products: PosProduct[]; initialCustomer: PosCustomer | null; today: string; accounts?: AccountOption[] }) {
+export function PosForm({ products, initialCustomer, today, accounts = [], points: pointsCfg = { enabled: false, value: 0, weekCap: 0 } }: { products: PosProduct[]; initialCustomer: PosCustomer | null; today: string; accounts?: AccountOption[]; points?: { enabled: boolean; value: number; weekCap: number } }) {
   const router = useRouter();
   const productMap = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
   const groups = useMemo(() => {
@@ -62,7 +62,10 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
   const [discountInput, setDiscountInput] = useState('');
   const [discountReason, setDiscountReason] = useState('');
   const [discountPin, setDiscountPin] = useState('');
+  // true while the discount was filled in from the customer's special discount (re-computed as items change)
+  const [discountAuto, setDiscountAuto] = useState(false);
   const [pct, setPct] = useState('');
+  const [pointsInput, setPointsInput] = useState('');
   const [terms, setTerms] = useState('DOWNPAYMENT');
   const [paidInput, setPaidInput] = useState('');
   const [method, setMethod] = useState('CASH');
@@ -74,10 +77,14 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
   const [saving, startSaving] = useTransition();
 
   // ── live computation
+  const specialBy = new Map((customer?.isInternal ? [] : customer?.specialPrices ?? []).map((sp) => [sp.productId, sp]));
   const computed = lines.map((l) => {
     const p = l.productId ? productMap.get(l.productId) : undefined;
-    if (!p) return { product: undefined, suggested: 0, unit: 0, total: 0, errors: [] as string[], overridden: false, qty: 0 };
-    const res = computeUnitPrice(p, l.selection as Selection, p.pricingMode === 'PER_SQFT' ? Number(l.widthFt) : null, p.pricingMode === 'PER_SQFT' ? Number(l.heightFt) : null);
+    if (!p) return { product: undefined, suggested: 0, normal: 0, special: false, unit: 0, total: 0, errors: [] as string[], overridden: false, qty: 0 };
+    const calc = computeUnitPrice(p, l.selection as Selection, p.pricingMode === 'PER_SQFT' ? Number(l.widthFt) : null, p.pricingMode === 'PER_SQFT' ? Number(l.heightFt) : null);
+    // Customer's special price (owner-set) replaces the normal price.
+    const specialUnit = applySpecialPrice(calc.unitPrice, specialBy.get(p.id));
+    const res = { ...calc, unitPrice: specialUnit ?? calc.unitPrice };
     const override = l.priceInput.trim() === '' ? NaN : toCentavos(l.priceInput);
     const overridden = !customer?.isInternal && Number.isFinite(override) && override !== res.unitPrice;
     const unit = customer?.isInternal ? 0 : Number.isFinite(override) ? override : res.unitPrice;
@@ -85,15 +92,39 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
     const errors = [...res.errors];
     if (l.priceInput.trim() !== '' && !(override >= 0)) errors.push('Unit price is not a valid amount.');
     if (!(qty >= 1)) errors.push('Quantity must be at least 1.');
-    return { product: p, suggested: res.unitPrice, unit, total: unit * (qty >= 1 ? qty : 0), errors, overridden, qty };
+    return { product: p, suggested: res.unitPrice, normal: calc.unitPrice, special: specialUnit !== null, unit, total: unit * (qty >= 1 ? qty : 0), errors, overridden, qty };
   });
   const subtotal = computed.reduce((s, c) => s + c.total, 0);
   const discount = toCentavosOrZero(discountInput);
-  const total = subtotal - (Number.isFinite(discount) ? discount : 0);
+  // Customer's special discount (set by the owner): pre-approved, so no PIN needed up to this amount.
+  const specialPct = !customer?.isInternal && customer?.specialDiscountPct ? customer.specialDiscountPct : 0;
+  const specialAmount = specialPct ? Math.round((subtotal * specialPct) / 100) : 0;
+  const needsPin = discount > 0 && discount > specialAmount;
+  // Loyalty points used as pesos off (only when the promo is on and the customer has points).
+  const canUsePoints = pointsCfg.enabled && !!customer && !customer.isInternal && (customer.points ?? 0) > 0 && pointsCfg.value > 0;
+  const afterDiscount = subtotal - (Number.isFinite(discount) ? discount : 0);
+  const maxPoints = canUsePoints ? Math.max(0, Math.min(customer!.points ?? 0, Math.floor(afterDiscount / pointsCfg.value), pointsCfg.weekCap > 0 ? pointsCfg.weekCap : Infinity)) : 0;
+  const pointsUsed = canUsePoints ? Math.max(0, Math.floor(Number(pointsInput) || 0)) : 0;
+  const pointsAmount = pointsUsed * pointsCfg.value;
+  const total = afterDiscount - pointsAmount;
   const paid = terms === 'FULL' ? total : toCentavosOrZero(paidInput);
   const balance = total - (Number.isFinite(paid) ? paid : 0);
 
+  useEffect(() => {
+    if (specialPct) {
+      if (discountAuto || discountInput.trim() === '') {
+        setDiscountInput(specialAmount ? centavosToInput(specialAmount) : '');
+        setDiscountReason(`Special customer discount (${specialPct}%)`);
+        setDiscountAuto(true);
+      }
+    } else if (discountAuto) {
+      setDiscountInput(''); setDiscountReason(''); setDiscountAuto(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [specialPct, specialAmount]);
+
   function applyPct() {
+    setDiscountAuto(false);
     const n = Number(pct);
     if (!(n > 0) || n > 100) return;
     setDiscountInput(centavosToInput(Math.round((subtotal * n) / 100)));
@@ -119,7 +150,8 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
     if (!Number.isFinite(discount) || discount < 0) problems.push('Discount is not a valid amount.');
     else if (discount > subtotal) problems.push('Discount cannot be more than the subtotal.');
     else if (discount > 0 && !discountReason.trim()) problems.push('Enter a reason for the discount.');
-    else if (discount > 0 && !discountPin) problems.push('Ask the owner to enter their approval PIN for the discount.');
+    else if (needsPin && !discountPin) problems.push(specialAmount ? `The discount is more than ${customer?.name}'s special ${specialPct}% (${peso(specialAmount)}): ask the owner to enter their approval PIN.` : 'Ask the owner to enter their approval PIN for the discount.');
+    if (pointsUsed > maxPoints) problems.push(`Use at most ${maxPoints} point(s) on this order.`);
     if (paid > 0 && method !== 'CASH' && accountChoices.length > 0 && !accountId) problems.push(`Choose which ${PAYMENT_METHOD[method]} account received the payment.`);
     if (!Number.isFinite(paid) || paid < 0) problems.push('Amount paid is not a valid amount.');
     else if (paid > total) problems.push('Amount paid is more than the total.');
@@ -150,7 +182,8 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
       notes,
       discount: Number.isFinite(discount) ? discount : 0,
       discountReason,
-      discountPin: discount > 0 ? discountPin : '',
+      discountPin: needsPin ? discountPin : '',
+      pointsUsed,
       paymentTerms: terms,
       amountPaid: paid,
       method,
@@ -239,23 +272,37 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
                           );
                         }
                         if (o.type === 'MULTI') {
+                          // Add-ons: one dropdown per add-on; "+" adds another, "×" removes one. The same add-on can't be picked twice.
                           const ids = Array.isArray(sel) ? sel : [];
+                          const label = (v: (typeof o.values)[number]) => `${v.label}${v.priceDelta ? ` (${v.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(v.priceDelta))})` : ''}`;
+                          const rows = ids.length ? ids : [0];
+                          const left = o.values.filter((v) => !ids.includes(v.id));
                           return (
-                            <fieldset key={o.id} className="sm:col-span-2">
-                              <legend className="label">{o.name}{o.required ? ' *' : ''}</legend>
-                              <div className="flex flex-wrap gap-x-4 gap-y-1">
-                                {o.values.map((v) => (
-                                  <label key={v.id} className="flex items-center gap-1.5 text-sm">
-                                    <input
-                                      type="checkbox"
-                                      checked={ids.includes(v.id)}
-                                      onChange={(e) => setSel(e.target.checked ? [...ids, v.id] : ids.filter((x) => x !== v.id))}
-                                    />
-                                    {v.label}{v.priceDelta ? <span className="text-xs text-slate-500">({v.priceDelta > 0 ? '+' : '−'}{peso(Math.abs(v.priceDelta))})</span> : null}
-                                  </label>
+                            <div key={o.id} className="block">
+                              <span className="label">{o.name}{o.required ? ' *' : ''}</span>
+                              <div className="space-y-1.5">
+                                {rows.map((id, i) => (
+                                  <div key={i} className="flex gap-1.5">
+                                    <select className="input min-w-0 flex-1" value={id || ''}
+                                      onChange={(e) => {
+                                        const v = Number(e.target.value) || 0;
+                                        const next = [...rows]; next[i] = v;
+                                        setSel(next.filter((x, j) => x > 0 && next.indexOf(x) === j));
+                                      }}>
+                                      <option value="">{o.required && i === 0 ? '— choose —' : '— none —'}</option>
+                                      {o.values.filter((v) => v.id === id || !ids.includes(v.id)).map((v) => <option key={v.id} value={v.id}>{label(v)}</option>)}
+                                    </select>
+                                    {ids.length > 0 && id > 0 && (
+                                      <button type="button" className="btn-secondary shrink-0 px-3" title={`Remove this ${o.name.toLowerCase()}`} aria-label="Remove"
+                                        onClick={() => setSel(ids.filter((x) => x !== id))}>×</button>
+                                    )}
+                                  </div>
                                 ))}
+                                {ids.length > 0 && !ids.includes(0) && left.length > 0 && (
+                                  <button type="button" className="btn-secondary px-3 text-[13px]" onClick={() => setSel([...ids, 0])}>+ Add another</button>
+                                )}
                               </div>
-                            </fieldset>
+                            </div>
                           );
                         }
                         return (
@@ -287,6 +334,7 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
                         />
                       </label>
                       <div className="col-span-2 flex flex-col justify-end text-sm">
+                        {c.special && <div className="font-medium text-emerald-700">Special discount for {customer?.name}: less {peso(c.normal - c.suggested)} each (normally {peso(c.normal)})</div>}
                         <div className="text-slate-500">Suggested: {peso(c.suggested)}{p.pricingMode === 'PER_SQFT' && Number(l.widthFt) > 0 && Number(l.heightFt) > 0 ? ` (${(Number(l.widthFt) * Number(l.heightFt)).toFixed(2)} sq ft)` : ''}</div>
                         <div className="text-base font-semibold">Line total: {peso(c.total)}</div>
                       </div>
@@ -337,22 +385,42 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
           <div>
             <span className="label">Discount (₱)</span>
             <div className="flex gap-2">
-              <input className="input" inputMode="decimal" value={discountInput} placeholder="0.00" onChange={(e) => setDiscountInput(e.target.value)} />
+              <input className="input" inputMode="decimal" value={discountInput} placeholder="0.00" onChange={(e) => { setDiscountAuto(false); setDiscountInput(e.target.value); }} />
               <input className="input w-20" inputMode="decimal" value={pct} placeholder="%" aria-label="Discount percent" onChange={(e) => setPct(e.target.value)} />
               <button type="button" className="btn-secondary whitespace-nowrap" onClick={applyPct}>Apply %</button>
             </div>
+            {specialPct > 0 && (
+              <span className="mt-1 block text-xs font-medium text-emerald-700">
+                {customer?.name} has a special {specialPct}% discount ({peso(specialAmount)}) set by the owner — no PIN needed{discountAuto ? ', filled in automatically' : ''}.
+                {!discountAuto && discount !== specialAmount && <button type="button" className="ml-1 underline" onClick={() => { setDiscountInput(specialAmount ? centavosToInput(specialAmount) : ''); setDiscountReason(`Special customer discount (${specialPct}%)`); setDiscountAuto(true); }}>Use it</button>}
+              </span>
+            )}
           </div>
           {discount > 0 && (
             <>
               <label className="block"><span className="label">Discount reason *</span>
                 <input className="input" value={discountReason} onChange={(e) => setDiscountReason(e.target.value)} />
               </label>
-              <label className="block"><span className="label">Owner approval PIN *</span>
+              {needsPin && <label className="block"><span className="label">Owner approval PIN *</span>
                 <input className="input" type="password" inputMode="numeric" maxLength={8} autoComplete="off" value={discountPin}
                   onChange={(e) => setDiscountPin(e.target.value.replace(/\D/g, ''))} placeholder="Owner enters their PIN to approve" />
-                <span className="mt-1 block text-xs text-slate-500">Discounts must be approved with the owner&apos;s PIN.</span>
-              </label>
+                <span className="mt-1 block text-xs text-slate-500">{specialAmount ? `More than the special ${specialPct}% needs the owner's PIN.` : 'Discounts must be approved with the owner\'s PIN.'}</span>
+              </label>}
             </>
+          )}
+          {canUsePoints && (
+            <div className="sm:col-span-2 rounded border border-emerald-200 bg-emerald-50 px-3 py-2">
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="block"><span className="label">Use points</span>
+                  <input className="input w-28 num" inputMode="numeric" value={pointsInput} placeholder="0" onChange={(e) => setPointsInput(e.target.value.replace(/\D/g, ''))} />
+                </label>
+                <button type="button" className="btn-secondary btn-sm mb-0.5" onClick={() => setPointsInput(String(maxPoints))} disabled={maxPoints === 0}>Use max ({maxPoints})</button>
+                <p className="mb-1 text-[13px] text-emerald-900">
+                  {customer!.name} has <b>{customer!.points} points</b> (worth {peso((customer!.points ?? 0) * pointsCfg.value)}). 1 point = {peso(pointsCfg.value)} off{pointsCfg.weekCap > 0 ? ` · at most ${pointsCfg.weekCap} points a week` : ''}.
+                  {pointsUsed > 0 && <> Using {pointsUsed} = <b>−{peso(pointsAmount)}</b>.</>}
+                </p>
+              </div>
+            </div>
           )}
         </div>
       </section>
@@ -403,6 +471,7 @@ export function PosForm({ products, initialCustomer, today, accounts = [] }: { p
           <div className="flex flex-wrap gap-x-5 gap-y-1 text-sm">
             <span>Subtotal <b>{peso(subtotal)}</b></span>
             {discount > 0 && <span>Discount <b>−{peso(discount)}</b></span>}
+            {pointsAmount > 0 && <span>Points <b>−{peso(pointsAmount)}</b></span>}
             <span>Total <b className="text-lg">{peso(total)}</b></span>
             <span>Paid <b>{peso(Number.isFinite(paid) ? paid : 0)}</b></span>
             <span>Balance <b className={balance > 0 ? 'text-red-600' : 'text-emerald-600'}>{peso(balance)}</b></span>

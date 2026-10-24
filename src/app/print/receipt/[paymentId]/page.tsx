@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { requireUser } from '@/lib/auth';
 import { getSettings } from '@/lib/settings';
 import { PrintHeader } from '@/components/PrintHeader';
+import { SlipFooter } from '@/components/SlipFooter';
 import { peso } from '@/lib/money';
 import { fmtDateTime } from '@/lib/dates';
 import { PAYMENT_METHOD } from '@/lib/labels';
@@ -16,7 +17,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ paymen
   const [p, s] = await Promise.all([
     prisma.payment.findUnique({
       where: { id: Number(paymentId) || 0 },
-      include: { order: true, customer: true, receivedBy: { select: { name: true } }, account: true },
+      include: { order: true, customer: { select: { name: true } }, receivedBy: { select: { name: true } }, account: true },
     }),
     getSettings(),
   ]);
@@ -25,8 +26,8 @@ export default async function ReceiptPage({ params }: { params: Promise<{ paymen
   return (
     <>
       <style>{`
-        @page { size: A5 landscape; margin: 8mm; }
-        .receipt { width: 210mm; min-height: 148mm; }
+        @page { size: 8.5in 5.5in; margin: 8mm; }
+        .receipt { width: 8.5in; min-height: 5.5in; }
         @media print { .receipt { width: auto; min-height: 0; box-shadow: none !important; padding: 0 !important; } }
       `}</style>
       <div className="receipt relative mx-auto max-w-full overflow-hidden bg-white p-[8mm] text-[12px] leading-snug text-black shadow">
@@ -38,7 +39,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ paymen
         <PrintHeader s={s} title="Acknowledgement Receipt" docNo={p.receiptNo} date={fmtDateTime(p.paidAt)} badge={p.voided ? 'VOID' : null} />
 
         <div className="relative mt-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1">
-          <span className="font-semibold">Received from:</span><span>{p.customer.name}{p.customer.mobile ? ` (${p.customer.mobile})` : ''}</span>
+          <span className="font-semibold">Received from:</span><span>{p.customer.name}</span>
           <span className="font-semibold">For order no.:</span><span>{p.order.orderNo}</span>
           <span className="font-semibold">Amount:</span><span className="text-lg font-bold">{peso(p.amount)}</span>
           <span className="font-semibold">Method:</span><span>{PAYMENT_METHOD[p.method]}</span>
@@ -50,7 +51,7 @@ export default async function ReceiptPage({ params }: { params: Promise<{ paymen
           {p.voided && <><span className="font-semibold">VOIDED:</span><span>{fmtDateTime(p.voidedAt)} — {p.voidReason}</span></>}
         </div>
 
-        {s.receipt_footer && <p className="mt-4 text-center text-[11px]">{s.receipt_footer}</p>}
+        {s.receipt_footer && <SlipFooter text={s.receipt_footer} className="mt-4 text-[11px]" />}
 
         <div className="mt-10 grid grid-cols-2 gap-10">
           <div className="border-t border-black pt-1 text-center">Received by: {p.receivedBy.name}</div>

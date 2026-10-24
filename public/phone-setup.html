@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Paper & Pixels — phone setup</title>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Paper & Pixels — phone & PC setup</title>
 <style>body{font-family:-apple-system,system-ui,sans-serif;max-width:560px;margin:0 auto;padding:20px;color:#0f172a;line-height:1.5}h1{font-size:22px}h2{font-size:16px;margin-top:22px}ol{padding-left:20px}li{margin:6px 0}a.btn{display:inline-block;background:#1452d9;color:#fff;padding:12px 18px;border-radius:6px;text-decoration:none;font-weight:600}code{background:#f1f5f9;padding:2px 6px;border-radius:4px}.note{background:#fef3c7;border:1px solid #fcd34d;padding:10px 12px;border-radius:6px;font-size:14px}</style></head>
 <body>
-<h1>Paper &amp; Pixels — set up this phone (one time)</h1>
-<p>So the <b>Time Clock camera and location</b> work on this phone, install the shop's certificate once. It only applies to the shop app, nothing else.</p>
+<h1>Paper &amp; Pixels — set up this phone or PC (one time)</h1>
+<p>So the <b>Time Clock camera and location</b> work on this phone or computer, install the shop's certificate once. It only applies to the shop app, nothing else.</p>
 <p><a class="btn" href="/ca.crt" download="Paper-and-Pixels-CA.crt">1. Download the certificate</a></p>
 <h2>iPhone / iPad</h2>
 <ol>
@@ -16,8 +16,20 @@
 <li>Tap the button above (the file saves to Downloads).</li>
 <li><b>Settings → Security → More security / Encryption &amp; credentials → Install a certificate → CA certificate</b> → Install anyway → choose the downloaded file.</li>
 </ol>
+<h2>Windows PC — Chrome or Edge</h2>
+<ol>
+<li>Click the button above, then open the downloaded <code>Paper-and-Pixels-CA.crt</code>.</li>
+<li><b>Install Certificate…</b> → <b>Current User</b> → Next → <b>Place all certificates in the following store</b> → Browse → <b>Trusted Root Certification Authorities</b> → OK → Next → Finish → <b>Yes</b> on the security warning.</li>
+<li>Close and reopen the browser.</li>
+</ol>
+<h2>Windows PC or Mac — Firefox</h2>
+<ol>
+<li>Click the button above (the file saves to Downloads).</li>
+<li>Firefox menu ☰ → <b>Settings</b> → search <b>certificates</b> → <b>View Certificates…</b> → <b>Authorities</b> tab → <b>Import…</b> → choose the downloaded file.</li>
+<li>Tick <b>Trust this CA to identify websites</b> → OK → OK.</li>
+</ol>
 <h2>2. Open the app</h2>
-<p>Go to <b id="https-link"><a href="#">https://…:3443</a></b> and log in. Add it to your home screen (Share → Add to Home Screen). When the Time Clock asks, tap <b>Allow</b> for camera and location.</p>
-<p class="note">If the browser still warns about the certificate, step 3 (iPhone) or the CA install (Android) was skipped.</p>
+<p>Go to <b id="https-link"><a href="#">https://…:3443</a></b> and log in. On a phone, add it to your home screen (Share → Add to Home Screen). When the Time Clock asks, tap <b>Allow</b> for camera and location.</p>
+<p class="note">If the browser still warns about the certificate, the trust step above was skipped (iPhone: Certificate Trust Settings; Android: CA install; PC: Trusted Root / Firefox Authorities).</p>
 <script>var h=location.hostname;var u='https://'+h+':3443/';var a=document.querySelector('#https-link a');a.href=u;a.textContent=u;</script>
 </body></html>

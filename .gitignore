@@ -1,11 +1,12 @@
 node_modules
 .next
 .env
-backups/*.dump
 next-env.d.ts
 *.tsbuildinfo
 .pgdata
 .next-build
 .logs
-backups/*.zip
 certs/
+# Database backups and recovery copies never go to git (customer data)
+backups/*
+!backups/.gitkeep

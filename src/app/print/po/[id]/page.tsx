@@ -26,8 +26,8 @@ export default async function PrintPOPage({ params }: { params: Promise<{ id: st
   if (!po) notFound();
 
   return (
-    <div className="mx-auto max-w-[210mm] bg-white p-[12mm] text-[12px] leading-snug text-black shadow print:max-w-none print:p-0 print:shadow-none">
-      <style>{`@page { size: letter; margin: 12mm; }`}</style>
+    <div className="mx-auto w-[8.5in] max-w-full bg-white p-[8mm] text-[11px] leading-snug text-black shadow print:max-w-none print:p-0 print:shadow-none">
+      <style>{`@page { size: 8.5in 5.5in; margin: 8mm; }`}</style>
 
       <PrintHeader s={s} title="Purchase Order" docNo={po.poNo} date={`Date: ${fmtDate(po.orderDate)}`} badge={po.status === 'CANCELLED' ? 'CANCELLED' : po.status === 'DRAFT' ? PO_STATUS.DRAFT : null} />
 

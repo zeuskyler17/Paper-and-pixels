@@ -40,7 +40,7 @@ const MENU: MenuSection[] = [
     title: 'Finance',
     items: [
       { href: '/expenses', label: 'Expenses', icon: 'wallet', need: ['expenses', 'expenses_manage'] },
-      { href: '/reports', label: 'Reports', icon: 'chart', need: ['reports', 'reports_production', 'reports_inventory'] },
+      { href: '/reports', label: 'Reports', icon: 'chart', need: ['reports', 'reports_daily', 'reports_sales', 'reports_production', 'reports_inventory'] },
     ],
   },
   {

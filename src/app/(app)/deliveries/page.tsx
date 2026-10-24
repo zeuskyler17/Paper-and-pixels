@@ -6,6 +6,7 @@ import { peso } from '@/lib/money';
 import { fmtDate, manilaDayRange, parseDateInput } from '@/lib/dates';
 import { DELIVERY_METHOD, DELIVERY_STATUS } from '@/lib/labels';
 import { Card, Empty, FilterBar, PageHeader, StatusBadge, TableWrap } from '@/components/ui';
+import { DeliveryTabs } from './_tabs';
 
 export const metadata = { title: 'Deliveries' };
 
@@ -46,6 +47,7 @@ export default async function DeliveriesPage({ searchParams }: { searchParams: S
         subtitle={`${rows.length} record${rows.length === 1 ? '' : 's'}`}
         actions={<Link href="/deliveries/new" className="btn-primary">+ New delivery</Link>}
       />
+      <DeliveryTabs active="records" />
       <Card>
         <FilterBar>
           <input name="q" defaultValue={q} placeholder="Order no., customer, tracking" className="input w-56" />

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useEffect, useState, useTransition } from 'react';
 import { JOB_COLUMNS, JOB_STATUS } from '@/lib/labels';
 import { assignWorker, moveJob, takeJob } from './actions';
+import { ReleaseOrderButton } from '@/components/ReleaseOrderButton';
 
 export type JobCard = {
   id: number;
@@ -26,6 +27,8 @@ export type JobCard = {
   assignedBy: string | null;
   /** Latest status move: who moved it, to what, when. */
   lastMove: { to: string; by: string; at: string } | null;
+  /** Completed job whose order is not released yet: balance owed and whether all the order's jobs are done. */
+  release: { balance: number; ready: boolean } | null;
 };
 
 type Worker = { id: number; name: string };
@@ -46,8 +49,8 @@ const COLUMN_STYLE: Record<string, string> = {
 
 const VIEW_KEY = 'pp_jobs_view';
 
-export function Board({ jobs, workers, canAssign, showCancelled }: {
-  jobs: JobCard[]; workers: Worker[]; canAssign: boolean; showCancelled: boolean;
+export function Board({ jobs, workers, canAssign, canRelease = false, showCancelled }: {
+  jobs: JobCard[]; workers: Worker[]; canAssign: boolean; canRelease?: boolean; showCancelled: boolean;
 }) {
   const [view, setView] = useState<'board' | 'list'>('board');
   const [error, setError] = useState<string | null>(null);
@@ -99,6 +102,7 @@ export function Board({ jobs, workers, canAssign, showCancelled }: {
       job={job}
       workers={workers}
       canAssign={canAssign}
+      canRelease={canRelease}
       busy={busyId === job.id}
       draggable={view === 'board' && job.status !== 'CANCELLED'}
       onDragStart={() => setDragId(job.id)}
@@ -186,8 +190,8 @@ export function Board({ jobs, workers, canAssign, showCancelled }: {
   );
 }
 
-function JobCardView({ job, workers, canAssign, busy, draggable, onDragStart, onDragEnd, onMove, onAssign, onTake }: {
-  job: JobCard; workers: Worker[]; canAssign: boolean; busy: boolean; draggable: boolean;
+function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onDragStart, onDragEnd, onMove, onAssign, onTake }: {
+  job: JobCard; workers: Worker[]; canAssign: boolean; canRelease: boolean; busy: boolean; draggable: boolean;
   onDragStart: () => void; onDragEnd: () => void; onMove: (to: string) => void; onAssign: (workerId: string) => void; onTake: () => void;
 }) {
   // A worker looking at an unassigned job: they can claim it, but not move it until it is theirs.
@@ -270,6 +274,9 @@ function JobCardView({ job, workers, canAssign, busy, draggable, onDragStart, on
             {JOB_COLUMNS.filter((c) => c !== job.status).map((c) => <option key={c} value={c}>{JOB_STATUS[c]}</option>)}
           </select>
         </div>
+      )}
+      {canRelease && job.release && (
+        <ReleaseOrderButton orderId={job.orderId} orderNo={job.orderNo} balance={job.release.balance} ready={job.release.ready} className="mt-2" />
       )}
     </article>
   );

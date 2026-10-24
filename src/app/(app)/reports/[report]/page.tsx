@@ -35,7 +35,7 @@ export default async function ReportPage({ params, searchParams }: { params: Par
   if (!canSeeReport(user, report)) redirect('/reports');
   const meta = REPORTS[report];
   const p = normalizeParams(await searchParams);
-  const data = await buildReport(report, p);
+  const data = await buildReport(report, p, user.isAdmin);
 
   const qs = (extra: Record<string, string>) => {
     const u = new URLSearchParams({ from: p.from, to: p.to, ...(report === 'sales' ? { group: p.group ?? 'daily' } : {}), ...extra });
@@ -46,12 +46,12 @@ export default async function ReportPage({ params, searchParams }: { params: Par
   return (
     <div className="space-y-4">
       <style>{`
-        @page { size: A4 ${report === 'inventory' ? 'landscape' : 'portrait'}; margin: 12mm; }
+        @page { size: 8.5in 5.5in; margin: 8mm; }
         @media print {
           main { margin-left: 0 !important; padding: 0 !important; }
           .card { box-shadow: none !important; border: none !important; }
-          .table { font-size: 10px; }
-          .table th, .table td { padding: 3px 6px; }
+          .table { font-size: 8.5px; }
+          .table th, .table td { padding: 2px 4px; }
           a { color: inherit !important; text-decoration: none !important; }
         }
       `}</style>
@@ -69,6 +69,19 @@ export default async function ReportPage({ params, searchParams }: { params: Par
           </div>
         }
       />
+
+      {'singleDay' in meta && meta.singleDay && (
+        <div className="no-print card p-4">
+          <div className="mb-3 flex flex-wrap gap-2">
+            {[['Today', todayManila()], ['Yesterday', addDays(todayManila(), -1)]].map(([label, d]) => (
+              <Link key={label} href={`/reports/${report}?${qs({ from: d, to: d })}`} className={`btn-sm ${p.to === d ? 'btn-primary' : 'btn-secondary'}`}>{label}</Link>
+            ))}
+          </div>
+          <FilterBar>
+            <label><span className="label">Day</span><input type="date" name="to" defaultValue={p.to} className="input w-auto" /></label>
+          </FilterBar>
+        </div>
+      )}
 
       {meta.usesRange && (
         <div className="no-print card p-4">

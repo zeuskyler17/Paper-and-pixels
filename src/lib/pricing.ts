@@ -60,14 +60,16 @@ export function computeUnitPrice(
       unit += v.priceDelta;
       specs.push({ optionId: opt.id, optionValueId: v.id, name: opt.name, value: v.label, numberValue: null, priceEffect: v.priceDelta });
     } else if (opt.type === 'MULTI') {
-      const ids = Array.isArray(sel) ? sel : [];
+      const ids = Array.isArray(sel) ? [...new Set(sel)] : []; // unique values; blanks (0) from the order form are skipped
+      let picked = 0;
       for (const id of ids) {
         const v = opt.values.find((x) => x.id === id && x.active !== false);
         if (!v) continue;
+        picked++;
         unit += v.priceDelta;
         specs.push({ optionId: opt.id, optionValueId: v.id, name: opt.name, value: v.label, numberValue: null, priceEffect: v.priceDelta });
       }
-      if (opt.required && ids.length === 0) errors.push(`${product.name}: choose at least one ${opt.name}.`);
+      if (opt.required && picked === 0) errors.push(`${product.name}: choose at least one ${opt.name}.`);
     } else {
       const n = typeof sel === 'number' ? sel : NaN;
       if (!Number.isFinite(n)) {
@@ -84,3 +86,29 @@ export function computeUnitPrice(
 
   return { unitPrice: Math.max(0, unit), specs, errors };
 }
+
+/** Group specs of the same option: [Add Ons: Case, Add Ons: Acrylic] -> [["Add Ons", "Case, Acrylic"]]. Keeps the original order. */
+export function groupSpecs(specs: { name: string; value: string }[]): [string, string][] {
+  const out: [string, string][] = [];
+  for (const s of specs) {
+    const same = out.find(([n]) => n === s.name);
+    if (same) same[1] = `${same[1]}, ${s.value}`;
+    else out.push([s.name, s.value]);
+  }
+  return out;
+}
+
+/** "Leaves: 15; Cover: 9; Add Ons: Case, Acrylic" */
+export const specsText = (specs: { name: string; value: string }[]) => groupSpecs(specs).map(([n, v]) => `${n}: ${v}`).join('; ');
+
+/** A customer's special discount on one product: centavos deducted from each item's normal price. */
+export type SpecialPrice = { productId: number; amountOff: number };
+
+/** The unit price this customer pays (normal minus their amount off, never below 0), or null when there is no special discount. */
+export function applySpecialPrice(normal: number, sp: SpecialPrice | null | undefined): number | null {
+  if (!sp || !(sp.amountOff > 0)) return null;
+  return Math.max(0, normal - sp.amountOff);
+}
+
+/** "₱3.00 off each" */
+export const specialPriceLabel = (sp: SpecialPrice, peso: (c: number) => string) => `${peso(sp.amountOff)} off each`;
