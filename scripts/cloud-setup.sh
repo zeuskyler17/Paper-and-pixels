@@ -2,7 +2,8 @@
 # One-time setup of the online copy: Supabase database + Vercel settings.
 # Reads the Supabase connection from .env.supabase (never printed, never committed).
 #   ./scripts/cloud-setup.sh db    create/update the tables for all three branches (safe: migrate deploy only)
-#   ./scripts/cloud-setup.sh env   put the database URLs and a new AUTH_SECRET into the Vercel project (production)
+#   ./scripts/cloud-setup.sh copy  copy this Mac's data for all three branches into the (empty) Supabase tables
+#   ./scripts/cloud-setup.sh env  put the database URLs and a new AUTH_SECRET into the Vercel project (production)
 # Branches share one Supabase database, one schema each: Paper & Pixels = public, Keoni = keoni, Ky = ky.
 set -eu
 cd "$(dirname "$0")/.."
@@ -31,6 +32,10 @@ REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon, authenticated;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated;
 SQL
     echo "Database ready."
+    ;;
+  copy)
+    # Copy this Mac's data (all three branches) into the empty Supabase tables. Read-only on this Mac.
+    SUPABASE_URL="$(url_for public)" sh -c 'set -a; . ./.env; set +a; exec npx tsx scripts/copy-to-cloud.ts'
     ;;
   env)
     add() { printf '%s' "$2" | npx --yes vercel@latest env add "$1" production --force >/dev/null && echo "set $1"; }
