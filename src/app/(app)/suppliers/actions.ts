@@ -9,7 +9,7 @@ import { attempt, optInt, optStr, str, type ActionState } from '@/lib/action';
 import { audit } from '@/lib/audit';
 import { peso, toCentavos } from '@/lib/money';
 import { parseDateInput, todayManila } from '@/lib/dates';
-import { PAYMENT_METHOD } from '@/lib/labels';
+import { PAYMENT_METHOD, MONEY_METHODS } from '@/lib/labels';
 
 function readSupplier(fd: FormData) {
   const name = str(fd, 'name');
@@ -67,7 +67,7 @@ export async function recordSupplierPayment(supplierId: number, _prev: ActionSta
     const amount = toCentavos(fd.get('amount'));
     if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter an amount greater than zero.');
     const method = str(fd, 'method') as PaymentMethod;
-    if (!(method in PAYMENT_METHOD)) throw new Error('Choose a payment method.');
+    if (!(method in MONEY_METHODS)) throw new Error('Choose a payment method.');
     const dateStr = str(fd, 'paidAt') || todayManila();
     const day = parseDateInput(dateStr);
     if (!day) throw new Error('Invalid payment date.');

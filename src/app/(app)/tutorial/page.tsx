@@ -20,7 +20,7 @@ function TutorialCard({ href, image, title, who, slides, chapters, tone }: {
   return (
     <Link href={href} className="group card block overflow-hidden p-0 transition hover:-translate-y-0.5 hover:shadow-lg">
       {/* thumbnail: a real screenshot, cropped, with a play button */}
-      <div className="relative aspect-[16/9] overflow-hidden bg-slate-900">
+      <div className="theme-light relative aspect-[16/9] overflow-hidden bg-slate-900">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={`/tutorial/${image}`} alt="" className="absolute inset-0 h-full w-full object-cover object-top opacity-90 transition group-hover:scale-[1.03] group-hover:opacity-100" />
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950/85 via-slate-950/20 to-transparent" />

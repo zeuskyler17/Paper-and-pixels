@@ -6,13 +6,15 @@ import { prisma } from '@/lib/db';
 import { assertUser } from '@/lib/auth';
 import { attempt, logActionError, optInt, optStr, str, type ActionState } from '@/lib/action';
 import { audit } from '@/lib/audit';
+import { printJobInfo } from '@/lib/printJob';
 import { nextNumber } from '@/lib/counters';
-import { applySpecialPrice, computeUnitPrice } from '@/lib/pricing';
+import { applySpecialPrice, computeUnitPrice, pickSpecialPrice } from '@/lib/pricing';
 import { earnForPayment, getPointsConfig, redeemOnOrder, refundForOrder, reverseForPayment, usedThisWeek } from '@/lib/points';
 import { recalcOrder, markOrderDelivered } from '@/lib/orders';
-import { deductBomForOrderItem, returnJobMaterials, returnOrderLineMaterials } from '@/lib/inventory';
+import { deductBomForOrderItem, returnDeductions, returnJobMaterials, returnOrderLineMaterials } from '@/lib/inventory';
 import { verifyApprovalPin } from '@/lib/approval';
 import { resolvePaymentAccount } from '@/lib/paymentAccounts';
+import { advanceBalance, applyAdvance, trimAdvanceUses } from '@/lib/advance';
 import { peso, toCentavos, toCentavosOrZero } from '@/lib/money';
 import { parseDateInput } from '@/lib/dates';
 import { FILE_SOURCE, ORDER_STATUS, PAYMENT_METHOD, PAYMENT_TERMS } from '@/lib/labels';
@@ -25,6 +27,8 @@ function errMsg(e: unknown) {
   logActionError(e);
   return e instanceof Error ? e.message : 'Something went wrong.';
 }
+
+const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
 function isKey<T extends string>(map: Record<string, string>, v: unknown): v is T {
   return typeof v === 'string' && Object.prototype.hasOwnProperty.call(map, v);
@@ -52,8 +56,8 @@ export async function searchCustomers(q: string): Promise<PosCustomer[]> {
       : {},
     orderBy: term ? { name: 'asc' } : { updatedAt: 'desc' },
     take: 15,
-    select: { id: true, name: true, mobile: true, facebook: true, isInternal: true, specialDiscountPct: true, specialPrices: { select: { productId: true, amountOff: true } }, points: true },
-  });
+    select: { id: true, name: true, mobile: true, facebook: true, isInternal: true, specialDiscountPct: true, specialPrices: { select: { productId: true, amountOff: true, optionValueId: true } }, points: true },
+  }).then((rows) => Promise.all(rows.map(async (c) => ({ ...c, advance: c.isInternal ? 0 : await advanceBalance(prisma, c.id) }))));
 }
 
 export async function quickCreateCustomer(input: { name: string; mobile: string; facebook: string }): Promise<JsonResult & { customer?: PosCustomer }> {
@@ -91,13 +95,18 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
     const notes = String(input.notes ?? '').trim() || null;
     const discount = Math.round(Number(input.discount) || 0);
     const discountReason = String(input.discountReason ?? '').trim() || null;
-    const amountPaid = Math.round(Number(input.amountPaid) || 0);
+    const amount1 = Math.round(Number(input.amountPaid) || 0);
     const reference = String(input.reference ?? '').trim() || null;
+    // Split payment: part by one method, the rest by another (two receipts).
+    const split = input.split && Math.round(Number(input.split.amount) || 0) > 0
+      ? { amount: Math.round(Number(input.split.amount) || 0), method: String(input.split.method ?? ''), accountId: input.split.accountId ?? null, reference: String(input.split.reference ?? '').trim() || null }
+      : null;
+    const amountPaid = amount1 + (split?.amount ?? 0);
 
     const order = await prisma.$transaction(async (tx) => {
       const customer = await tx.customer.findUnique({ where: { id: customerId }, include: { specialPrices: true } });
       if (!customer) throw new Error('Customer not found.');
-      const specialBy = new Map(customer.specialPrices.map((sp) => [sp.productId, sp]));
+
       // Own branch: a stock transfer, not a sale — no prices, discounts or payments.
       const internal = customer.isInternal;
       if (internal && (discount > 0 || amountPaid > 0)) throw new Error(`${customer.name} is a branch of the shop: transfers have no prices, discounts or payments.`);
@@ -126,7 +135,7 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
         if (!Number.isInteger(quantity) || quantity < 1) errors.push(`Item ${n}: quantity must be a whole number of at least 1.`);
 
         // The customer's special price (set by the owner) becomes the normal price for this order: no reason or approval needed.
-        const special = internal ? null : applySpecialPrice(price.unitPrice, specialBy.get(product.id));
+        const special = internal ? null : applySpecialPrice(price.unitPrice, pickSpecialPrice(customer.specialPrices, product.id, price.specs.map((sp) => sp.optionValueId)));
         const suggested = internal ? 0 : special ?? price.unitPrice;
         let unitPrice = suggested;
         let overrideReason: string | null = null;
@@ -188,14 +197,20 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
       const earnsPoints = !internal && !preApproved && !items.some((x) => x.specialUsed);
       const total = subtotal - discount - pointsAmount;
 
-      if (amountPaid < 0) throw new Error('Amount paid cannot be negative.');
+      if (amount1 < 0 || (split && split.amount < 0)) throw new Error('Amount paid cannot be negative.');
       if (amountPaid > total) throw new Error(`Amount paid is more than the order total (${peso(total)}). Record only the amount applied to this order.`);
       if (terms === 'FULL' && amountPaid !== total) throw new Error(`Full payment terms: amount paid must be ${peso(total)}.`);
       if (terms === 'DOWNPAYMENT' && amountPaid <= 0 && total > 0) throw new Error('Downpayment terms: enter the downpayment amount.');
       let method: PaymentMethod | null = null;
-      if (amountPaid > 0) {
+      if (amount1 > 0) {
         if (!isKey<PaymentMethod>(PAYMENT_METHOD, input.method)) throw new Error('Choose the payment method.');
         method = input.method;
+      }
+      let method2: PaymentMethod | null = null;
+      if (split) {
+        if (!isKey<PaymentMethod>(PAYMENT_METHOD, split.method)) throw new Error('Choose the method of the second payment.');
+        method2 = split.method;
+        if (amount1 <= 0) throw new Error('Split payment: enter the first amount too (or turn off the split).');
       }
 
       const orderNo = await nextNumber(tx, 'PP');
@@ -234,6 +249,12 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
           const job = await tx.job.create({ data: { orderId: order.id, orderItemId: item.id, status: 'PENDING', dueDate: targetDate } });
           await tx.jobStatusLog.create({ data: { jobId: job.id, fromStatus: null, toStatus: 'PENDING', note: `Created from order ${orderNo}`, userId: user.id } });
           jobs++;
+          if (it.product.printJob) {
+            // Lay Flat albums: the pages are a separate job on the Photo Printing board.
+            const pj = await tx.job.create({ data: { orderId: order.id, orderItemId: item.id, kind: 'PRINT', status: 'PENDING', dueDate: targetDate } });
+            await tx.jobStatusLog.create({ data: { jobId: pj.id, fromStatus: null, toStatus: 'PENDING', note: `Lay flat printing for order ${orderNo} — ${printJobInfo({ description: it.product.name, quantity: it.quantity, specs: it.specs }).detail}`, userId: user.id } });
+            jobs++;
+          }
         } else {
           // No production job for this category (e.g. photo printing): materials leave stock at sale time.
           await deductBomForOrderItem(tx, item.id, user.id);
@@ -246,14 +267,24 @@ export async function createOrder(input: CreateOrderInput): Promise<JsonResult> 
       }
 
       let receiptNo: string | null = null;
-      if (amountPaid > 0 && method) {
-        const accountId = await resolvePaymentAccount(tx, method, input.accountId ?? null);
-        receiptNo = await nextNumber(tx, 'AR');
+      const parts: { amount: number; method: PaymentMethod; accountId: number | null | undefined; reference: string | null }[] = [];
+      if (amount1 > 0 && method) parts.push({ amount: amount1, method, accountId: input.accountId ?? null, reference });
+      if (split && method2) parts.push({ amount: split.amount, method: method2, accountId: split.accountId, reference: split.reference });
+      const fromAdvance = sum(parts.filter((x) => x.method === 'ADVANCE').map((x) => x.amount));
+      if (fromAdvance > 0) {
+        const avail = await advanceBalance(tx, customerId);
+        if (fromAdvance > avail) throw new Error(`${customer.name} has only ${peso(avail)} of advance payment available.`);
+      }
+      for (const part of parts) {
+        const accountId = part.method === 'ADVANCE' ? null : await resolvePaymentAccount(tx, part.method, part.accountId ?? null);
+        const rn = await nextNumber(tx, 'AR');
+        receiptNo = receiptNo ? `${receiptNo}, ${rn}` : rn;
         const p = await tx.payment.create({
-          data: { receiptNo, orderId: order.id, customerId, amount: amountPaid, method, reference, accountId, receivedById: user.id, notes: 'Paid at order creation' },
+          data: { receiptNo: rn, orderId: order.id, customerId, amount: part.amount, method: part.method, reference: part.reference, accountId, receivedById: user.id, notes: parts.length > 1 ? 'Paid at order creation (split payment)' : 'Paid at order creation' },
         });
-        await audit(tx, user.id, 'CREATE', 'Payment', p.id, `${receiptNo}: ${peso(amountPaid)} ${PAYMENT_METHOD[method]} for ${orderNo}`,
-          { orderId: order.id, amount: amountPaid, method, reference });
+        const drawn = part.method === 'ADVANCE' ? await applyAdvance(tx, customerId, p.id, part.amount) : [];
+        await audit(tx, user.id, 'CREATE', 'Payment', p.id, `${rn}: ${peso(part.amount)} ${PAYMENT_METHOD[part.method]} for ${orderNo}${drawn.length ? ` (from ${drawn.map((d) => d.receiptNo).join(', ')})` : ''}`,
+          { orderId: order.id, amount: part.amount, method: part.method, reference: part.reference, fromAdvance: drawn });
         await earnForPayment(tx, p.id, user.id, pts);
       }
 
@@ -291,19 +322,52 @@ export async function addPayment(orderId: number, _prev: ActionState, fd: FormDa
       if (order.status === 'CANCELLED') throw new Error('This order is cancelled.');
       if (order.customer.isInternal) throw new Error(`${order.customer.name} is a branch of the shop — transfers are not paid for.`);
       if (amount > order.balance) throw new Error(`Amount is more than the balance (${peso(order.balance)}).`);
-      const accountId = await resolvePaymentAccount(tx, method, optInt(fd, 'accountId'));
+      if (method === 'ADVANCE') {
+        const avail = await advanceBalance(tx, order.customerId);
+        if (amount > avail) throw new Error(`${order.customer.name} has only ${peso(avail)} of advance payment available.`);
+      }
+      const accountId = method === 'ADVANCE' ? null : await resolvePaymentAccount(tx, method, optInt(fd, 'accountId'));
       receiptNo = await nextNumber(tx, 'AR');
       const p = await tx.payment.create({
         data: { receiptNo, orderId, customerId: order.customerId, amount, method, reference, notes, accountId, receivedById: user.id },
       });
+      const drawn = method === 'ADVANCE' ? await applyAdvance(tx, order.customerId, p.id, amount) : [];
       await recalcOrder(tx, orderId);
-      await audit(tx, user.id, 'CREATE', 'Payment', p.id, `${receiptNo}: ${peso(amount)} ${PAYMENT_METHOD[method]} for ${order.orderNo}`,
-        { orderId, amount, method, accountId, reference, notes });
+      await audit(tx, user.id, 'CREATE', 'Payment', p.id, `${receiptNo}: ${peso(amount)} ${PAYMENT_METHOD[method]} for ${order.orderNo}${drawn.length ? ` (from ${drawn.map((d) => d.receiptNo).join(', ')})` : ''}`,
+        { orderId, amount, method, accountId, reference, notes, fromAdvance: drawn });
       earned = await earnForPayment(tx, p.id, user.id);
     });
     revalidateOrder(orderId);
     return { ok: `Payment recorded — receipt ${receiptNo}.${earned ? ` Customer earned ${earned} point${earned === 1 ? '' : 's'}.` : ''}` };
   });
+}
+
+/** Correct how a payment was received (method, account, reference). Amount and date stay; voided payments can't be edited. */
+export async function updatePayment(paymentId: number, _prev: ActionState, fd: FormData): Promise<ActionState> {
+  let orderId = 0;
+  const res = await attempt(async () => {
+    const user = await assertUser('orders');
+    const method = str(fd, 'method');
+    if (!isKey<PaymentMethod>(PAYMENT_METHOD, method)) throw new Error('Choose the payment method.');
+    const reference = optStr(fd, 'reference');
+    await prisma.$transaction(async (tx) => {
+      const p = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, include: { order: { select: { orderNo: true, status: true } }, account: true } });
+      orderId = p.orderId;
+      if (p.voided) throw new Error('This payment is void and cannot be edited.');
+      if (p.order.status === 'CANCELLED') throw new Error('This order is cancelled.');
+      if ((p.method === 'ADVANCE') !== (method === 'ADVANCE')) throw new Error('A payment from an advance payment cannot be changed to another method (or the other way round). Void it and record it again.');
+      const accountId = method === 'ADVANCE' ? null : await resolvePaymentAccount(tx, method, optInt(fd, 'accountId'));
+      const changed = p.method !== method || (p.accountId ?? null) !== (accountId ?? null) || (p.reference ?? null) !== reference;
+      if (!changed) return;
+      const after = await tx.payment.update({ where: { id: paymentId }, data: { method, accountId: accountId ?? null, reference }, include: { account: true } });
+      await audit(tx, user.id, 'UPDATE', 'Payment', paymentId,
+        `${p.receiptNo} on ${p.order.orderNo}: ${PAYMENT_METHOD[p.method]}${p.account ? ` (${p.account.label})` : ''} → ${PAYMENT_METHOD[method]}${after.account ? ` (${after.account.label})` : ''}${reference !== (p.reference ?? null) ? ` · ref ${reference ?? '—'}` : ''}`,
+        { before: { method: p.method, accountId: p.accountId, reference: p.reference }, after: { method, accountId: accountId ?? null, reference } });
+    });
+    return { ok: 'Payment updated.' };
+  });
+  if (orderId) revalidateOrder(orderId);
+  return res;
 }
 
 export async function voidPayment(paymentId: number, _prev: ActionState, fd: FormData): Promise<ActionState> {
@@ -313,18 +377,75 @@ export async function voidPayment(paymentId: number, _prev: ActionState, fd: For
     const user = await assertUser('orders');
     const reason = str(fd, 'reason');
     if (!reason) throw new Error('Enter the reason for voiding this payment.');
+    const scope = str(fd, 'scope') || 'all';
+    let msg = 'Payment voided.';
     await prisma.$transaction(async (tx) => {
       const p = await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, include: { order: true } });
       orderId = p.orderId;
       if (p.voided) throw new Error('This payment is already void.');
+      // Whole receipt, the part paid for one order item, or any amount (a partial void).
+      let amount = p.amount;
+      let itemText = '';
+      let voidItem: { id: number; description: string; quantity: number; lineTotal: number } | null = null;
+      if (scope !== 'all') {
+        amount = toCentavos(fd.get('amount'));
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter the amount to void.');
+        if (amount > p.amount) throw new Error(`Only ${peso(p.amount)} was received on ${p.receiptNo}.`);
+        if (scope.startsWith('item:')) {
+          const it = await tx.orderItem.findFirst({ where: { id: Number(scope.slice(5)) || 0, orderId: p.orderId }, select: { id: true, description: true, quantity: true, lineTotal: true, voidedAt: true } });
+          if (!it) throw new Error('That item is not on this order.');
+          if (it.voidedAt) throw new Error(`${it.description} is already voided.`);
+          if (p.order.status === 'DELIVERED') throw new Error('Items of a delivered order cannot be voided.');
+          voidItem = it;
+          itemText = `${it.quantity} × ${it.description}`;
+        }
+      }
       const approver = await verifyApprovalPin(tx, str(fd, 'approvalPin'), user.id, 'a void');
-      await tx.payment.update({ where: { id: paymentId }, data: { voided: true, voidReason: reason, voidedAt: new Date(), voidedById: user.id, voidApprovedById: approver.id } });
+      const fullReason = itemText ? `${itemText}: ${reason}` : reason;
+      const voidData = { voided: true, voidReason: fullReason, voidedAt: new Date(), voidedById: user.id, voidApprovedById: approver.id };
+      if (amount >= p.amount) {
+        await tx.payment.update({ where: { id: paymentId }, data: voidData });
+        await reverseForPayment(tx, paymentId, user.id);
+        await audit(tx, user.id, 'VOID', 'Payment', paymentId, `Voided ${p.receiptNo} (${peso(p.amount)}) on ${p.order.orderNo}: ${fullReason} — approved by ${approver.name}`,
+          { amount: p.amount, reason: fullReason, approvedBy: approver.name });
+      } else {
+        // Partial void: the receipt keeps the rest; the voided part becomes its own voided row (AR-…-V1, -V2…).
+        const n = await tx.payment.count({ where: { receiptNo: { startsWith: `${p.receiptNo}-V` } } });
+        const v = await tx.payment.create({ data: {
+          receiptNo: `${p.receiptNo}-V${n + 1}`, orderId: p.orderId, customerId: p.customerId, amount, method: p.method, reference: p.reference, accountId: p.accountId,
+          notes: `Part of ${p.receiptNo} voided`, paidAt: p.paidAt, receivedById: p.receivedById, ...voidData,
+        } });
+        await tx.payment.update({ where: { id: paymentId }, data: { amount: p.amount - amount } });
+        if (p.method === 'ADVANCE') await trimAdvanceUses(tx, paymentId, p.amount - amount);
+        await reverseForPayment(tx, paymentId, user.id, amount / p.amount);
+        await audit(tx, user.id, 'VOID', 'Payment', v.id, `Voided ${peso(amount)} of ${p.receiptNo} (${peso(p.amount)}) on ${p.order.orderNo}: ${fullReason} — approved by ${approver.name}`,
+          { amount, of: p.amount, receiptNo: p.receiptNo, reason: fullReason, approvedBy: approver.name });
+        msg = `${peso(amount)} of ${p.receiptNo} voided — ${peso(p.amount - amount)} stays on the receipt.`;
+      }
+      if (p.method === 'ADVANCE') msg += ` ${peso(amount)} goes back to the customer's advance payment balance.`;
+      if (voidItem) {
+        // The item comes off the bill too: its jobs are cancelled, its materials go back to stock, and the order total drops.
+        await tx.orderItem.update({ where: { id: voidItem.id }, data: { voidedAt: new Date(), voidReason: reason } });
+        const jobs = await tx.job.findMany({ where: { orderItemId: voidItem.id, status: { notIn: ['COMPLETED', 'CANCELLED'] } } });
+        let returned = 0;
+        for (const j of jobs) {
+          await tx.job.update({ where: { id: j.id }, data: { status: 'CANCELLED' } });
+          await tx.jobStatusLog.create({ data: { jobId: j.id, fromStatus: j.status, toStatus: 'CANCELLED', note: `Item voided on ${p.order.orderNo}: ${reason}`, userId: user.id } });
+          if (j.materialsDeducted) returned += await returnJobMaterials(tx, j.id, user.id, `item voided on ${p.order.orderNo} (${reason})`);
+        }
+        returned += await returnDeductions(tx, { jobId: null, notes: { startsWith: `${p.order.orderNo} · ${voidItem.description}` } }, user.id, `item voided on ${p.order.orderNo} (${reason})`);
+        const live = await tx.orderItem.aggregate({ where: { orderId: p.orderId, voidedAt: null }, _sum: { lineTotal: true } });
+        const subtotal = live._sum.lineTotal ?? 0;
+        const discount = Math.min(p.order.discount, Math.max(0, subtotal - p.order.pointsAmount));
+        const total = Math.max(0, subtotal - discount - p.order.pointsAmount);
+        await tx.order.update({ where: { id: p.orderId }, data: { subtotal, discount, total } });
+        await audit(tx, user.id, 'VOID', 'OrderItem', voidItem.id, `Voided item ${itemText} (${peso(voidItem.lineTotal)}) on ${p.order.orderNo}: ${reason} — total ${peso(p.order.total)} → ${peso(total)}`,
+          { lineTotal: voidItem.lineTotal, totalBefore: p.order.total, totalAfter: total, jobsCancelled: jobs.map((j) => j.id), materialLinesReturned: returned });
+        msg += ` ${itemText} is off the order — total is now ${peso(total)}.`;
+      }
       await recalcOrder(tx, p.orderId);
-      await reverseForPayment(tx, paymentId, user.id);
-      await audit(tx, user.id, 'VOID', 'Payment', paymentId, `Voided ${p.receiptNo} (${peso(p.amount)}) on ${p.order.orderNo}: ${reason} — approved by ${approver.name}`,
-        { amount: p.amount, reason, approvedBy: approver.name });
     });
-    return { ok: 'Payment voided.' };
+    return { ok: msg };
   });
   if (orderId) revalidateOrder(orderId);
   return res;

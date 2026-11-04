@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { prisma } from '@/lib/db';
 import { requireUser, can } from '@/lib/auth';
 import { todayManila } from '@/lib/dates';
-import { PAYMENT_METHOD, options } from '@/lib/labels';
+import { PAYMENT_METHOD, options, MONEY_METHODS } from '@/lib/labels';
 import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { ImageUpload } from '@/components/ImageUpload';
 import { Card, Empty, Field, PageHeader, Select } from '@/components/ui';
@@ -30,7 +30,7 @@ export default async function NewExpensePage() {
               <Field label="Date *"><input type="date" name="date" defaultValue={todayManila()} max={todayManila()} required className="input" /></Field>
               <CategoryField categories={categories.map((c) => ({ id: c.id, name: c.name }))} />
               <Field label="Amount (₱) *"><input name="amount" inputMode="decimal" required placeholder="0.00" className="input" /></Field>
-              <Field label="Paid via *"><Select name="paidVia" required defaultValue="CASH" options={options(PAYMENT_METHOD)} /></Field>
+              <Field label="Paid via *"><Select name="paidVia" required defaultValue="CASH" options={options(MONEY_METHODS)} /></Field>
               <Field label="Notes" className="sm:col-span-2"><textarea name="notes" rows={2} className="input" placeholder="e.g. Meralco bill for September" /></Field>
               <div className="sm:col-span-2"><ImageUpload name="receipt" label="Receipt photo (optional)" /></div>
             </div>

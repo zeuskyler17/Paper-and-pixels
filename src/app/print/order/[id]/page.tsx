@@ -5,7 +5,7 @@ import { requireUser } from '@/lib/auth';
 import { getSettings, type Settings } from '@/lib/settings';
 import { peso } from '@/lib/money';
 import { fmtDate, fmtDateTime } from '@/lib/dates';
-import { FILE_SOURCE, ORDER_STATUS, PAYMENT_TERMS } from '@/lib/labels';
+import { FILE_SOURCE, ORDER_STATUS, PAYMENT_TERMS, PAYMENT_METHOD } from '@/lib/labels';
 import { PrintHeader } from '@/components/PrintHeader';
 import { SlipFooter } from '@/components/SlipFooter';
 import { specsText } from '@/lib/pricing';
@@ -32,7 +32,7 @@ export default async function OrderSlipPage({ params, searchParams }: { params: 
       include: {
         customer: { select: { name: true, isInternal: true } },
         createdBy: { select: { name: true } },
-        items: { orderBy: { id: 'asc' }, include: { specs: { orderBy: { id: 'asc' } } } },
+        items: { where: { voidedAt: null }, orderBy: { id: 'asc' }, include: { specs: { orderBy: { id: 'asc' } } } },
         payments: { where: { voided: false }, orderBy: { paidAt: 'asc' }, select: { receiptNo: true, amount: true, method: true, paidAt: true } },
       },
     }),
@@ -134,7 +134,7 @@ function Slip({ order, s, kind, items, page, pages }: { order: OrderDoc; s: Sett
 
       {/* Customer, then target date · payment terms · prepared by on one line (no mobile number on printouts). */}
       <section className="space-y-0.5 border-b border-black py-1.5">
-        <div><span className="font-semibold">Customer:</span> {order.customer.name}</div>
+        <div className="text-[13px]"><span className="font-normal">Customer:</span> <span className="text-[14.5px] font-semibold">{order.customer.name}</span></div>
         <div className="flex flex-wrap gap-x-6 gap-y-0.5">
           <span><span className="font-semibold">Target date:</span> {fmtDate(order.targetDate)}</span>
           <span><span className="font-semibold">Payment terms:</span> {PAYMENT_TERMS[order.paymentTerms]}</span>
@@ -198,7 +198,7 @@ function Slip({ order, s, kind, items, page, pages }: { order: OrderDoc; s: Sett
           {kind === 'ack' && order.payments.length > 0 && (
             <div className="mt-1">
               <div className="font-semibold">Payments received:</div>
-              {order.payments.map((p) => <div key={p.receiptNo}>{p.receiptNo} · {fmtDate(p.paidAt)} · {p.method.replace('_', ' ')} · {peso(p.amount)}</div>)}
+              {order.payments.map((p) => <div key={p.receiptNo}>{p.receiptNo} · {fmtDate(p.paidAt)} · {PAYMENT_METHOD[p.method] ?? p.method} · {peso(p.amount)}</div>)}
             </div>
           )}
         </div>

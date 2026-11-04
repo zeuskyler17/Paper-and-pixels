@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { fmtDate, todayManila } from '@/lib/dates';
 import { centavosToInput, peso } from '@/lib/money';
-import { PAYMENT_METHOD, options } from '@/lib/labels';
+import { PAYMENT_METHOD, options, MONEY_METHODS } from '@/lib/labels';
 import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { Badge, Empty, Field, Select, TableWrap } from '@/components/ui';
 import { recordSupplierPayment, voidSupplierPayment } from './actions';
@@ -19,7 +19,7 @@ export function SupplierPaymentForm({ supplierId, poId, pos, suggestedAmount }: 
         <Field label="Amount (₱) *">
           <input name="amount" inputMode="decimal" required className="input" defaultValue={suggestedAmount && suggestedAmount > 0 ? centavosToInput(suggestedAmount) : ''} />
         </Field>
-        <Field label="Method *"><Select name="method" options={options(PAYMENT_METHOD)} defaultValue="CASH" required /></Field>
+        <Field label="Method *"><Select name="method" options={options(MONEY_METHODS)} defaultValue="CASH" required /></Field>
         <Field label="Reference" hint="GCash / bank ref, check no., OR no."><input name="reference" className="input" /></Field>
         <Field label="Date paid"><input name="paidAt" type="date" defaultValue={todayManila()} max={todayManila()} className="input" /></Field>
         {poId ? (

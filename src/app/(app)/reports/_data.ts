@@ -169,7 +169,7 @@ async function salesSummary(p: ReportParams): Promise<ReportData> {
 /** One-day detail for the sales summary: what was sold, per product and per order line. */
 async function productsSoldTables(start: Date, end: Date): Promise<ReportTable[]> {
   const items = await prisma.orderItem.findMany({
-    where: { order: { createdAt: { gte: start, lt: end }, status: { not: 'CANCELLED' }, customer: { isInternal: false } } },
+    where: { voidedAt: null, order: { createdAt: { gte: start, lt: end }, status: { not: 'CANCELLED' }, customer: { isInternal: false } } },
     orderBy: [{ order: { createdAt: 'asc' } }, { id: 'asc' }],
     select: {
       description: true, quantity: true, unitPrice: true, lineTotal: true, widthFt: true, heightFt: true, specsNotes: true,
@@ -252,7 +252,7 @@ async function productsSoldTables(start: Date, end: Date): Promise<ReportTable[]
 async function salesByCategory(p: ReportParams): Promise<ReportData> {
   const { start, end } = manilaRange(p.from, p.to);
   const items = await prisma.orderItem.findMany({
-    where: { order: { createdAt: { gte: start, lt: end }, status: { not: 'CANCELLED' }, customer: { isInternal: false } } },
+    where: { voidedAt: null, order: { createdAt: { gte: start, lt: end }, status: { not: 'CANCELLED' }, customer: { isInternal: false } } },
     select: { quantity: true, lineTotal: true, productId: true, product: { select: { name: true, category: { select: { name: true, sortOrder: true } } } } },
   });
 
@@ -598,11 +598,11 @@ async function workerProductivity(p: ReportParams): Promise<ReportData> {
     prisma.user.findMany({ where: { OR: [{ accessRole: { isAdmin: false, permissions: { has: 'jobs_own' } } }, { jobsAssigned: { some: {} } }] }, select: { id: true, name: true, active: true }, orderBy: { name: 'asc' } }),
     prisma.job.findMany({
       where: { status: 'COMPLETED', completedAt: { gte: start, lt: end } },
-      select: { assignedToId: true, createdAt: true, completedAt: true },
+      select: { assignedToId: true, createdAt: true, completedAt: true, helpers: { select: { userId: true } } },
     }),
     prisma.job.findMany({
       where: { status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
-      select: { assignedToId: true, status: true, dueDate: true },
+      select: { assignedToId: true, status: true, dueDate: true, helpers: { select: { userId: true } } },
     }),
   ]);
   type G = { done: number; days: number; inProcess: number; overdue: number };
@@ -612,15 +612,21 @@ async function workerProductivity(p: ReportParams): Promise<ReportData> {
     if (!g) { g = { done: 0, days: 0, inProcess: 0, overdue: 0 }; map.set(id, g); }
     return g;
   };
+  // Every worker on a job (lead + helpers) gets credit for it.
+  const people = (j: { assignedToId: number | null; helpers: { userId: number }[] }) => [j.assignedToId, ...j.helpers.map((h) => h.userId)];
   for (const j of completed) {
-    const g = get(j.assignedToId);
-    g.done += 1;
-    g.days += (j.completedAt!.getTime() - j.createdAt.getTime()) / 86_400_000;
+    for (const id of people(j)) {
+      const g = get(id);
+      g.done += 1;
+      g.days += (j.completedAt!.getTime() - j.createdAt.getTime()) / 86_400_000;
+    }
   }
   for (const j of open) {
-    const g = get(j.assignedToId);
-    if (j.status === 'IN_PROCESS' || j.status === 'QUALITY_CHECK') g.inProcess += 1;
-    if (isOverdue(j.dueDate)) g.overdue += 1;
+    for (const id of people(j)) {
+      const g = get(id);
+      if (j.status === 'IN_PROCESS' || j.status === 'QUALITY_CHECK') g.inProcess += 1;
+      if (isOverdue(j.dueDate)) g.overdue += 1;
+    }
   }
   const rowFor = (name: string, g: G | undefined): Row => ({
     worker: name, done: g?.done ?? 0,
@@ -632,8 +638,9 @@ async function workerProductivity(p: ReportParams): Promise<ReportData> {
     .filter((r, i) => workers[i].active || (r.done as number) + (r.inProcess as number) + (r.overdue as number) > 0);
   if (map.has(null)) rows.push(rowFor('(Unassigned)', map.get(null)));
 
+  // Totals count each job once, even when several workers shared it.
   const totalDone = completed.length;
-  const totalDays = sum([...map.values()].map((g) => g.days));
+  const totalDays = sum(completed.map((j) => (j.completedAt!.getTime() - j.createdAt.getTime()) / 86_400_000));
   return {
     title: REPORTS.workers.title,
     period: periodLabel(p),
@@ -652,6 +659,7 @@ async function workerProductivity(p: ReportParams): Promise<ReportData> {
     notes: [
       'Completed jobs are counted by completion date in the period. "In process" and "Overdue" are current counts (not limited to the period).',
       'Overdue = not completed/cancelled and past its due date.',
+      'When several workers share a job, each of them gets credit for it; the Total row counts each job once.',
     ],
   };
 }
@@ -665,16 +673,17 @@ async function photoPrinting(p: ReportParams): Promise<ReportData> {
   const [items, outside] = await Promise.all([
     prisma.orderItem.findMany({
       where: {
+        voidedAt: null,
         order: { createdAt: { gte: start, lt: end }, status: { not: 'CANCELLED' } },
         OR: [
           { product: { bom: { some: { material: rollMaterial } } } },
-          { job: { stockMovements: { some: { type: 'JOB_DEDUCT', material: rollMaterial } } } },
+          { jobs: { some: { stockMovements: { some: { type: 'JOB_DEDUCT', material: rollMaterial } } } } },
         ],
       },
       select: {
         description: true, quantity: true, orderId: true,
         specs: { select: { name: true, value: true } },
-        job: {
+        jobs: {
           select: {
             status: true,
             stockMovements: { where: { type: 'JOB_DEDUCT', returnedAt: null, material: rollMaterial }, select: { quantity: true, unitCost: true, material: { select: { id: true, name: true, unit: true, rollLengthM: true } } } },
@@ -699,7 +708,7 @@ async function photoPrinting(p: ReportParams): Promise<ReportData> {
   for (const it of items) {
     const size = it.specs.find((sp) => /size/i.test(sp.name))?.value ?? it.description;
     const paper = it.specs.find((sp) => /paper|photo type|finish/i.test(sp.name))?.value ?? '—';
-    const moves = it.job?.stockMovements ?? [];
+    const moves = it.jobs.flatMap((j) => j.stockMovements);
     const material = moves[0]?.material ?? null;
     const key = `${size}|${paper}|${material?.id ?? 0}`;
     let g = groups.get(key);
@@ -778,7 +787,7 @@ async function photoPrinting(p: ReportParams): Promise<ReportData> {
  */
 async function dailyReport(day: string): Promise<ReportData> {
   const { start, end } = manilaRange(day, day);
-  const [payments, expenses, byAccount, sold] = await Promise.all([
+  const [allPayments, deposits, expenses, byAccount, sold] = await Promise.all([
     prisma.payment.findMany({
       where: { paidAt: { gte: start, lt: end }, voided: false },
       orderBy: { paidAt: 'asc' },
@@ -787,6 +796,12 @@ async function dailyReport(day: string): Promise<ReportData> {
         account: { select: { label: true } }, receivedBy: { select: { name: true } },
         customer: { select: { name: true } }, order: { select: { id: true, orderNo: true } },
       },
+    }),
+    // Advance payments received today: real money in, before any order exists.
+    prisma.customerDeposit.findMany({
+      where: { receivedAt: { gte: start, lt: end }, voided: false },
+      orderBy: { receivedAt: 'asc' },
+      select: { id: true, receiptNo: true, receivedAt: true, amount: true, method: true, reference: true, account: { select: { label: true } }, receivedBy: { select: { name: true } }, customer: { select: { id: true, name: true } } },
     }),
     prisma.expense.findMany({
       where: { date: { gte: start, lt: end }, voided: false },
@@ -798,28 +813,64 @@ async function dailyReport(day: string): Promise<ReportData> {
   ]);
   const time = new Intl.DateTimeFormat('en-PH', { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit' });
 
-  const collected = sum(payments.map((p) => p.amount));
-  const spent = sum(expenses.map((e) => e.amount));
-  const cashIn = sum(payments.filter((p) => p.method === 'CASH').map((p) => p.amount));
-  const cashOut = sum(expenses.filter((e) => e.paidVia === 'CASH').map((e) => e.amount));
+  // Money received today = order payments + advance payments received (same receipt series). Order payments
+  // drawn from an advance payment ("ADVANCE") are not new money: listed on their own, never in the money lines.
+  type PayLike = (typeof allPayments)[number] & { href?: string };
+  const advPays = allPayments.filter((p) => p.method === 'ADVANCE');
+  const depositRows: PayLike[] = deposits.map((d) => ({
+    receiptNo: d.receiptNo, paidAt: d.receivedAt, amount: d.amount, method: d.method, reference: d.reference, account: d.account, receivedBy: d.receivedBy,
+    customer: { name: d.customer.name }, order: { id: 0, orderNo: 'Advance payment' }, href: `/customers/${d.customer.id}`,
+  }));
+  const payments: PayLike[] = [...allPayments.filter((p) => p.method !== 'ADVANCE'), ...depositRows].sort((a, b) => a.paidAt.getTime() - b.paidAt.getTime());
+  const advIn = sum(advPays.map((p) => p.amount));
+  const cashDeposits = sum(deposits.filter((d) => d.method === 'CASH').map((d) => d.amount));
+  const otherDeposits = sum(deposits.filter((d) => d.method !== 'CASH').map((d) => d.amount));
+  // Daily sales = CASH only. GCash / Maya / bank payments are listed separately, never in the sales line.
+  const cashPays = payments.filter((p) => p.method === 'CASH');
+  const otherPays = payments.filter((p) => p.method !== 'CASH');
+  const cashIn = sum(cashPays.map((p) => p.amount));
+  const otherIn = sum(otherPays.map((p) => p.amount));
+  const cashExp = expenses.filter((e) => e.paidVia === 'CASH');
+  const otherExp = expenses.filter((e) => e.paidVia !== 'CASH');
+  const cashOut = sum(cashExp.map((e) => e.amount));
+  const otherOut = sum(otherExp.map((e) => e.amount));
+  const spent = cashOut + otherOut;
   const methods = Object.entries(PAYMENT_METHOD)
-    .map(([m, label]) => ({ label, amount: sum(payments.filter((p) => p.method === m).map((p) => p.amount)), count: payments.filter((p) => p.method === m).length }))
+    .filter(([m]) => m !== 'CASH')
+    .map(([m, label]) => ({ label, amount: sum(otherPays.filter((p) => p.method === m).map((p) => p.amount)), count: otherPays.filter((p) => p.method === m).length }))
     .filter((m) => m.count > 0);
 
   const summary: Row[] = [
-    { item: 'Sales collected (all payments)', count: payments.length, amount: collected },
+    { item: 'Daily sales collected (CASH only)', count: cashPays.length, amount: cashIn },
+    ...(cashDeposits ? [{ item: '   · of which advance payments received in cash', count: deposits.filter((d) => d.method === 'CASH').length, amount: cashDeposits }] : []),
+    { item: 'Less: expenses paid in cash', count: cashExp.length, amount: -cashOut },
+    { item: 'NET — cash sales less cash expenses', count: null, amount: cashIn - cashOut },
+    { item: 'Other payments received — NOT in daily sales', count: otherPays.length, amount: otherIn },
     ...methods.map((m) => ({ item: `   · ${m.label}`, count: m.count, amount: m.amount })),
-    { item: 'Less: expenses', count: expenses.length, amount: -spent },
-    { item: 'NET — sales collected less expenses', count: null, amount: collected - spent },
-    { item: 'Cash on hand today (cash collected − cash expenses)', count: null, amount: cashIn - cashOut },
+    ...(otherDeposits ? [{ item: '   · of which advance payments received (GCash / other)', count: deposits.filter((d) => d.method !== 'CASH').length, amount: otherDeposits }] : []),
+    ...(otherExp.length ? [{ item: 'Expenses paid via GCash / other', count: otherExp.length, amount: -otherOut }] : []),
+    { item: 'All money received today (cash + other)', count: payments.length, amount: cashIn + otherIn },
+    ...(advPays.length ? [{ item: 'Orders paid from advance payments (money received earlier — not counted again)', count: advPays.length, amount: advIn }] : []),
   ];
 
-  const paymentRows: Row[] = payments.map((p) => ({
-    _href: `/orders/${p.order.id}`,
+  const payRow = (p: PayLike): Row => ({
+    _href: p.href ?? `/orders/${p.order.id}`,
     receipt: p.receiptNo, time: time.format(p.paidAt), customer: p.customer.name, orderNo: p.order.orderNo,
     method: PAYMENT_METHOD[p.method], account: p.method === 'CASH' ? 'Cash drawer' : p.account?.label ?? '— not specified —',
     reference: p.reference ?? '', by: p.receivedBy.name, amount: p.amount,
-  }));
+  });
+  const paymentColumns = [
+    { key: 'receipt', label: 'Receipt', type: 'text' },
+    { key: 'time', label: 'Time', type: 'text' },
+    { key: 'customer', label: 'Customer', type: 'text' },
+    { key: 'orderNo', label: 'Order', type: 'text' },
+    { key: 'method', label: 'Method', type: 'text' },
+    { key: 'account', label: 'Received in', type: 'text' },
+    { key: 'reference', label: 'Reference', type: 'text' },
+    { key: 'by', label: 'Received by', type: 'text' },
+    { key: 'amount', label: 'Amount', type: 'money' },
+  ] as const;
+  const payTotals = (amount: number) => ({ receipt: 'Total', time: null, customer: null, orderNo: null, method: null, account: null, reference: null, by: null, amount });
   const expenseRows: Row[] = expenses.map((e) => ({
     category: e.category.name, details: [e.otherDetail, e.notes].filter(Boolean).join(' — '), via: PAYMENT_METHOD[e.paidVia], by: e.createdBy.name, amount: e.amount,
   }));
@@ -834,22 +885,9 @@ async function dailyReport(day: string): Promise<ReportData> {
     ],
     rows: summary,
     extra: [
-      {
-        title: 'Daily sales collected (payments received)',
-        columns: [
-          { key: 'receipt', label: 'Receipt', type: 'text' },
-          { key: 'time', label: 'Time', type: 'text' },
-          { key: 'customer', label: 'Customer', type: 'text' },
-          { key: 'orderNo', label: 'Order', type: 'text' },
-          { key: 'method', label: 'Method', type: 'text' },
-          { key: 'account', label: 'Received in', type: 'text' },
-          { key: 'reference', label: 'Reference', type: 'text' },
-          { key: 'by', label: 'Received by', type: 'text' },
-          { key: 'amount', label: 'Amount', type: 'money' },
-        ],
-        rows: paymentRows,
-        totals: { receipt: 'Total', time: null, customer: null, orderNo: null, method: null, account: null, reference: null, by: null, amount: collected },
-      },
+      { title: 'Daily sales collected (CASH payments)', columns: [...paymentColumns], rows: cashPays.map(payRow), totals: payTotals(cashIn) },
+      { title: 'Other payments received (GCash / Maya / bank — not part of daily sales)', columns: [...paymentColumns], rows: otherPays.map(payRow), totals: payTotals(otherIn) },
+      ...(advPays.length ? [{ title: 'Orders paid from advance payments (money received on an earlier day — not in today\'s totals)', columns: [...paymentColumns], rows: advPays.map(payRow), totals: payTotals(advIn) }] : []),
       {
         title: 'Expenses',
         columns: [
@@ -866,7 +904,8 @@ async function dailyReport(day: string): Promise<ReportData> {
       ...sold,
     ],
     notes: [
-      'Sales collected = payments received on this day (by payment date), including balances paid on older orders. Voided payments and expenses are excluded.',
+      'Daily sales collected = CASH payments received on this day (by payment date), including balances paid on older orders and advance payments received. GCash / Maya / bank payments are shown separately and are not counted as daily sales. Voided payments are excluded.',
+      'An order paid with "Advance payment" uses money the customer gave earlier (counted on the day it was received), so it is listed on its own and not added to today\'s money.',
       'Products sold and items sold are orders created on this day (cancelled orders and branch transfers excluded); amounts are before order discounts.',
     ],
   };

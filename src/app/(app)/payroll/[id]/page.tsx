@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { requireUser } from '@/lib/auth';
 import { peso } from '@/lib/money';
 import { fmtDate, fmtDateTime, toDateInput } from '@/lib/dates';
-import { PAYMENT_METHOD, PAYROLL_STATUS, PAY_FREQUENCY, PAY_TYPE, options } from '@/lib/labels';
+import { PAYMENT_METHOD, PAYROLL_STATUS, PAY_FREQUENCY, PAY_TYPE, options, MONEY_METHODS } from '@/lib/labels';
 import { eligibleEmployees } from '@/lib/payroll';
 import { employeeName } from '@/lib/hr';
 import { ActionForm, SubmitButton } from '@/components/ActionForm';
@@ -231,7 +231,7 @@ export default async function PayrollRunPage({ params }: { params: Promise<{ id:
           <ActionForm action={markPaidAction.bind(null, run.id)} confirm={`Mark payroll ${run.runNo} as paid (${peso(run.totalNet)})? A Salaries expense will be recorded.`} className="flex flex-wrap items-end gap-2">
             <label className="block w-56">
               <span className="label">Paid via</span>
-              <Select name="paidVia" options={options(PAYMENT_METHOD)} defaultValue="CASH" required />
+              <Select name="paidVia" options={options(MONEY_METHODS)} defaultValue="CASH" required />
             </label>
             <SubmitButton>Mark as paid</SubmitButton>
           </ActionForm>

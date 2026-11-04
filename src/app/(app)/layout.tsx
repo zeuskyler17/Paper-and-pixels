@@ -1,3 +1,4 @@
+import { cookies } from 'next/headers';
 import { requireUser, getBranch } from '@/lib/auth';
 import { prisma } from '@/lib/db';
 import { Nav, type NavItem, type NavSection } from '@/components/Nav';
@@ -90,9 +91,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
     if (same) same.items.push(...s.items); else merged.push({ ...s, items: [...s.items] });
   }
 
+  const theme = (await cookies()).get('pp_theme')?.value === 'light' ? 'light' : 'dark';
+
   return (
-    <div className="min-h-screen">
+    <div id="app-shell" className={`app-bg min-h-screen ${theme === 'dark' ? 'theme-dark' : ''}`}>
       <Nav
+        theme={theme}
         sections={merged}
         userName={user.name}
         roleLabel={user.roleName}

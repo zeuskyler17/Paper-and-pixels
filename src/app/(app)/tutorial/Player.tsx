@@ -85,7 +85,7 @@ export function Player({ start = 0, slides: SLIDES, chapters: CHAPTERS }: { star
   const onTime = () => { const a = audio.current; if (a && a.duration) setProgress(a.currentTime / a.duration); };
 
   return (
-    <div ref={box} className={`flex flex-col bg-slate-950 text-white ${fill ? 'fixed inset-0 z-[100] h-[100dvh]' : 'min-h-[70vh]'} ${isFs ? 'h-screen' : ''}`}>
+    <div ref={box} className={`theme-light flex flex-col bg-slate-950 text-white ${fill ? 'fixed inset-0 z-[100] h-[100dvh]' : 'min-h-[70vh]'} ${isFs ? 'h-screen' : ''}`}>
       <audio ref={audio} src={`/tutorial/audio/${slide.id}.m4a`} preload="auto" onTimeUpdate={onTime} />
 
       {/* stage */}

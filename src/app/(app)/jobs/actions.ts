@@ -24,9 +24,9 @@ function refresh(jobId: number) {
 
 /** Loads the job and checks that a worker only touches jobs assigned to them. */
 async function loadJob(tx: Tx, jobId: number, user: SessionUser) {
-  const job = await tx.job.findUnique({ where: { id: jobId }, include: { order: { select: { orderNo: true } } } });
+  const job = await tx.job.findUnique({ where: { id: jobId }, include: { order: { select: { orderNo: true } }, helpers: { select: { userId: true } } } });
   if (!job) throw new Error('Job not found.');
-  if (!can(user, 'jobs_manage') && job.assignedToId !== user.id) throw new Error('This job is not assigned to you.');
+  if (!can(user, 'jobs_manage') && job.assignedToId !== user.id && !job.helpers.some((h) => h.userId === user.id)) throw new Error('This job is not assigned to you.');
   return job;
 }
 
@@ -110,6 +110,41 @@ async function runAssign(jobId: number, workerId: number | null) {
     await audit(tx, user.id, 'UPDATE', 'Job', jobId, `${job.order.orderNo}: ${note}`, { from: job.assignedToId, to: workerId });
   });
   refresh(jobId);
+}
+
+/** Set the extra workers (helpers) on a job — e.g. two people on a frame. The lead stays in assignedTo. */
+export async function setHelpers(jobId: number, userIds: number[]): Promise<Result> {
+  const res = await attempt(async () => {
+    const user = await assertUser('jobs_manage');
+    await prisma.$transaction(async (tx) => {
+      const job = await loadJob(tx, jobId, user);
+      if (job.status === 'CANCELLED' || job.status === 'COMPLETED') throw new Error(`This job is already ${JOB_STATUS[job.status].toLowerCase()}.`);
+      const ids = [...new Set(userIds.map(Number).filter((n) => Number.isInteger(n) && n > 0 && n !== job.assignedToId))];
+      const workers = ids.length ? await tx.user.findMany({ where: { id: { in: ids }, ...ASSIGNABLE_WORKER }, select: { id: true, name: true } }) : [];
+      if (workers.length !== ids.length) throw new Error('Choose active production workers.');
+      const before = job.helpers.map((h) => h.userId);
+      const added = workers.filter((w) => !before.includes(w.id));
+      const removed = before.filter((id) => !ids.includes(id));
+      if (!added.length && !removed.length) return;
+      await tx.jobHelper.deleteMany({ where: { jobId, userId: { in: removed } } });
+      if (added.length) await tx.jobHelper.createMany({ data: added.map((w) => ({ jobId, userId: w.id, addedById: user.id })) });
+      const names = workers.map((w) => w.name);
+      const note = names.length ? `Also assigned: ${names.join(', ')}` : 'Extra workers removed';
+      await tx.jobStatusLog.create({ data: { jobId, note, userId: user.id } });
+      await audit(tx, user.id, 'UPDATE', 'Job', jobId, `${job.order.orderNo}: ${note}`, { helpers: ids });
+    });
+    refresh(jobId);
+    return { ok: 'Workers saved.' };
+  });
+  return res ?? {};
+}
+
+export async function setHelpersForm(jobId: number, _prev: ActionState, fd: FormData): Promise<ActionState> {
+  return attempt(async () => {
+    const r = await setHelpers(jobId, fd.getAll('helperId').map(Number));
+    if ('error' in r && r.error) throw new Error(r.error);
+    return { ok: 'Workers saved.' };
+  });
 }
 
 /** Called directly from the board's worker dropdown. */

@@ -79,12 +79,12 @@ export async function earnForPayment(tx: Tx, paymentId: number, userId: number |
   return points;
 }
 
-/** Take back the points a payment earned (the payment was voided). */
-export async function reverseForPayment(tx: Tx, paymentId: number, userId: number | null): Promise<number> {
+/** Take back the points a payment earned (the payment was voided). `share` < 1 = only part of the payment was voided. */
+export async function reverseForPayment(tx: Tx, paymentId: number, userId: number | null, share = 1): Promise<number> {
   const rows = await tx.pointsEntry.findMany({ where: { paymentId, kind: { in: ['EARN', 'REVERSE'] } }, select: { points: true, customerId: true, orderId: true } });
-  const net = rows.reduce((s, r) => s + r.points, 0);
+  const net = Math.floor(rows.reduce((s, r) => s + r.points, 0) * Math.min(1, Math.max(0, share)));
   if (net <= 0) return 0;
-  await post(tx, rows[0].customerId, -net, 'REVERSE', { paymentId, orderId: rows[0].orderId, userId, note: 'Payment voided' });
+  await post(tx, rows[0].customerId, -net, 'REVERSE', { paymentId, orderId: rows[0].orderId, userId, note: share < 1 ? 'Payment partly voided' : 'Payment voided' });
   return net;
 }
 

@@ -10,6 +10,7 @@ type P = {
   basePrice?: number;
   unit?: string;
   active?: boolean;
+  printJob?: boolean;
 };
 
 export function ProductFields({ p = {}, categories }: { p?: P; categories: { id: number; name: string }[] }) {
@@ -28,6 +29,9 @@ export function ProductFields({ p = {}, categories }: { p?: P; categories: { id:
       <Field label="Unit" hint="e.g. pc, album, set, sq ft"><input name="unit" defaultValue={p.unit ?? 'pc'} className="input" /></Field>
       <label className="flex items-center gap-2 self-end pb-2 text-sm">
         <input type="checkbox" name="active" defaultChecked={p.active ?? true} /> Active (available in the POS)
+      </label>
+      <label className="flex items-center gap-2 self-end pb-2 text-sm sm:col-span-2">
+        <input type="checkbox" name="printJob" defaultChecked={p.printJob ?? false} /> Also creates a <b>Lay Flat Print</b> job (the pages, by size and leaves) on the Photo Printing board
       </label>
       <Field label="Description" className="sm:col-span-2"><textarea name="description" defaultValue={p.description ?? ''} rows={2} className="input" /></Field>
     </div>

@@ -1,6 +1,7 @@
 // Presentational building blocks (server-component safe).
 import Link from 'next/link';
 import { TONE, type Tone } from '@/lib/labels';
+import { Icon, type IconName } from './Icons';
 
 export function PageHeader({ title, subtitle, actions }: { title: string; subtitle?: React.ReactNode; actions?: React.ReactNode }) {
   return (
@@ -57,24 +58,30 @@ export function StatusBadge({ value, labels }: { value: string; labels: Record<s
   return <Badge tone={TONE[value] ?? 'gray'}>{labels[value] ?? value}</Badge>;
 }
 
-const statStrip = { red: 'bg-red-600', amber: 'bg-amber-500', green: 'bg-emerald-600', none: 'bg-slate-300' };
+const statStrip = { red: 'from-red-500 to-red-500/0', amber: 'from-amber-500 to-amber-500/0', green: 'from-emerald-500 to-emerald-500/0', none: 'from-brand-500 to-brand-500/0' };
 const statText = { red: 'text-red-700', amber: 'text-amber-700', green: 'text-emerald-700', none: 'text-slate-900' };
+const statIcon = {
+  red: 'bg-red-50 text-red-600 ring-red-200', amber: 'bg-amber-50 text-amber-600 ring-amber-200',
+  green: 'bg-emerald-50 text-emerald-600 ring-emerald-200', none: 'bg-brand-50 text-brand-600 ring-brand-200',
+};
 
-/** KPI tile: signal strip on top, uppercase label, large monospaced figure. */
-export function Stat({ label, value, hint, href, tone }: { label: string; value: React.ReactNode; hint?: React.ReactNode; href?: string; tone?: 'red' | 'amber' | 'green' }) {
+/** KPI tile: accent strip on top, uppercase label, optional icon chip, large tabular figure. */
+export function Stat({ label, value, hint, href, tone, icon }: { label: string; value: React.ReactNode; hint?: React.ReactNode; href?: string; tone?: 'red' | 'amber' | 'green'; icon?: IconName }) {
   const k = tone ?? 'none';
   const body = (
-    <div className={`card relative h-full overflow-hidden px-4 pb-3.5 pt-4 ${href ? 'transition group-hover:border-slate-400' : ''}`}>
-      <span aria-hidden className={`absolute inset-x-0 top-0 h-[3px] ${statStrip[k]}`} />
-      <div className="flex items-start justify-between gap-2">
-        <div className="text-[10.5px] font-semibold uppercase tracking-[0.09em] text-slate-500">{label}</div>
-        {href && <span aria-hidden className="text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-500">→</span>}
+    <div className={`card relative h-full overflow-hidden px-4 pb-3.5 pt-4 ${href ? 'transition duration-200 group-hover:-translate-y-px group-hover:border-slate-300' : ''}`}>
+      <span aria-hidden className={`absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r ${statStrip[k]}`} />
+      <div className="flex items-start justify-between gap-3">
+        <div className="pt-0.5 text-[10.5px] font-semibold uppercase tracking-[0.09em] text-slate-500">{label}</div>
+        {icon ? (
+          <span aria-hidden className={`grid h-8 w-8 shrink-0 place-items-center rounded-md ring-1 ring-inset ${statIcon[k]}`}><Icon name={icon} className="h-[17px] w-[17px]" /></span>
+        ) : href && <span aria-hidden className="text-slate-400 transition group-hover:translate-x-0.5 group-hover:text-slate-600">→</span>}
       </div>
-      <div className={`mt-2 font-mono text-[24px] font-semibold leading-none tracking-tight tabular-nums ${statText[k]}`}>{value}</div>
+      <div className={`${icon ? 'mt-1' : 'mt-2'} font-mono text-[24px] font-semibold leading-none tracking-tight tabular-nums ${statText[k]}`}>{value}</div>
       {hint && <div className="mt-2 text-[12px] leading-snug text-slate-500">{hint}</div>}
     </div>
   );
-  return href ? <Link href={href} className="group block">{body}</Link> : body;
+  return href ? <Link href={href} className="group block rounded-md focus-visible:ring-2 focus-visible:ring-brand-500">{body}</Link> : body;
 }
 
 export function Empty({ children }: { children: React.ReactNode }) {

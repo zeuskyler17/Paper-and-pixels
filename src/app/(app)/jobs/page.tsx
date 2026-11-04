@@ -7,6 +7,7 @@ import { daysBetween, fmtDate, isOverdue, manilaDayRange, todayManila, addDays, 
 import { Card, FilterBar, PageHeader } from '@/components/ui';
 import { Board, type JobCard } from './Board';
 import { groupSpecs } from '@/lib/pricing';
+import { jobTitle, printJobInfo } from '@/lib/printJob';
 
 export const metadata = { title: 'Production board' };
 
@@ -21,11 +22,17 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
 
   const and: Prisma.JobWhereInput[] = [];
   // Workers see their own jobs, plus unassigned pending jobs they can take — enforced in the query.
-  if (isWorker) and.push({ OR: [{ assignedToId: user.id }, { assignedToId: null, status: 'PENDING' }] });
+  if (isWorker) and.push({ OR: [{ assignedToId: user.id }, { helpers: { some: { userId: user.id } } }, { assignedToId: null, status: 'PENDING' }] });
   else if (worker === 'none') and.push({ assignedToId: null });
-  else if (worker) and.push({ assignedToId: Number(worker) });
+  else if (worker) and.push({ OR: [{ assignedToId: Number(worker) }, { helpers: { some: { userId: Number(worker) } } }] });
 
-  if (category) and.push({ orderItem: { product: { categoryId: Number(category) } } });
+  // Lay Flat PRINT jobs sit on the Photo Printing board, whatever category their album is in.
+  const printCategory = (await prisma.productCategory.findFirst({ where: { name: { contains: 'print', mode: 'insensitive' }, NOT: { name: { contains: 'press', mode: 'insensitive' } } }, select: { id: true } }))?.id ?? null;
+  const categoryWhere = (id: number): Prisma.JobWhereInput => id === printCategory
+    ? { OR: [{ kind: 'PRINT' }, { kind: 'MAIN', orderItem: { product: { categoryId: id } } }] }
+    : { kind: 'MAIN', orderItem: { product: { categoryId: id } } };
+  const catClause = category ? categoryWhere(Number(category)) : null;
+  if (catClause) and.push(catClause);
   if (q) {
     and.push({
       order: { OR: [{ orderNo: { contains: q, mode: 'insensitive' } }, { customer: { name: { contains: q, mode: 'insensitive' } } }] },
@@ -46,9 +53,9 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
   if (cancelled) statusOr.push({ status: 'CANCELLED' });
   and.push({ OR: statusOr });
 
-  const perCategory = prisma.job.groupBy({
-    by: ['orderItemId'],
-    where: { AND: and.filter((w) => !('orderItem' in w)), status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
+  const perCategory = prisma.job.findMany({
+    where: { AND: and.filter((w) => w !== catClause), status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
+    select: { kind: true, orderItem: { select: { product: { select: { categoryId: true } } } } },
   });
   const [jobs, workers, categories, openJobs] = await Promise.all([
     prisma.job.findMany({
@@ -58,6 +65,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
       include: {
         order: { select: { id: true, orderNo: true, status: true, balance: true, customer: { select: { name: true } }, jobs: { select: { status: true } } } },
         assignedTo: { select: { id: true, name: true } },
+        helpers: { select: { user: { select: { id: true, name: true } } } },
         assignedBy: { select: { name: true } },
         // latest status move (who moved it where); assignment-only log rows have no toStatus
         logs: { where: { toStatus: { not: null } }, orderBy: { createdAt: 'desc' }, take: 1, select: { toStatus: true, createdAt: true, user: { select: { name: true } } } },
@@ -72,33 +80,36 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
     }),
     isWorker ? [] : prisma.user.findMany({ where: ASSIGNABLE_WORKER, orderBy: { name: 'asc' }, select: { id: true, name: true } }),
     prisma.productCategory.findMany({ where: { requiresProduction: true }, orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }] }),
-    perCategory.then((rows) => prisma.orderItem.findMany({ where: { id: { in: rows.map((r) => r.orderItemId) } }, select: { product: { select: { categoryId: true } } } })),
+    perCategory,
   ]);
   const openByCategory = new Map<number, number>();
-  for (const it of openJobs) openByCategory.set(it.product.categoryId, (openByCategory.get(it.product.categoryId) ?? 0) + 1);
+  for (const j of openJobs) { const cid = j.kind === 'PRINT' && printCategory ? printCategory : j.orderItem.product.categoryId; openByCategory.set(cid, (openByCategory.get(cid) ?? 0) + 1); }
   const current = categories.find((c) => c.id === Number(category)) ?? null;
   const tabHref = (cat: string) => { const p = new URLSearchParams(); if (cat) p.set('category', cat); if (q) p.set('q', q); if (worker) p.set('worker', worker); if (due) p.set('due', due); if (alldone) p.set('alldone', '1'); if (cancelled) p.set('cancelled', '1'); const s = p.toString(); return s ? `/jobs?${s}` : '/jobs'; };
 
   const cards: JobCard[] = jobs.map((j) => {
     const it = j.orderItem;
     const size = it.widthFt && it.heightFt ? `${it.widthFt} × ${it.heightFt} ft` : null;
+    const print = j.kind === 'PRINT' ? printJobInfo(it) : null;
     return {
       id: j.id,
+      kind: j.kind,
       status: j.status,
       orderId: j.order.id,
       orderNo: j.order.orderNo,
       customer: j.order.customer.name,
-      product: it.description,
-      category: it.product.category.name,
+      product: jobTitle(j.kind, it),
+      category: print ? `Photo Printing · pages of ${it.description}` : it.product.category.name,
       quantity: it.quantity,
       size,
-      specs: groupSpecs(it.specs).map(([n, v]) => `${n}: ${v}`),
+      specs: print ? [print.detail, ...groupSpecs(it.specs).filter(([n]) => /leaves/i.test(n)).map(([n, v]) => `${n}: ${v}`)] : groupSpecs(it.specs).map(([n, v]) => `${n}: ${v}`),
       specsNotes: it.specsNotes,
       due: j.dueDate ? fmtDate(j.dueDate) : null,
       overdue: isOverdue(j.dueDate) && j.status !== 'COMPLETED' && j.status !== 'CANCELLED',
       elapsedDays: daysBetween(j.createdAt),
       assignedToId: j.assignedToId,
       assignedName: j.assignedTo?.name ?? null,
+      helpers: j.helpers.map((h) => ({ id: h.user.id, name: h.user.name })),
       assignedBy: j.assignedBy && j.assignedAt ? `${j.assignedBy.name} · ${fmtDateTime(j.assignedAt)}` : null,
       lastMove: j.logs[0] ? { to: j.logs[0].toStatus!, by: j.logs[0].user.name, at: fmtDateTime(j.logs[0].createdAt) } : null,
       release: j.status === 'COMPLETED' && j.order.status !== 'DELIVERED' && j.order.status !== 'CANCELLED'
@@ -122,7 +133,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
           const n = c.id === 0 ? openJobs.length : openByCategory.get(c.id) ?? 0;
           return (
             <Link key={c.id} href={tabHref(c.id ? String(c.id) : '')}
-              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ${on ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+              className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium ${on ? 'seg-on' : 'text-slate-600 hover:bg-slate-100'}`}>
               {c.name}
               <span className={`rounded-full px-1.5 text-[11px] font-semibold tabular-nums ${on ? 'bg-white/20' : 'bg-slate-200 text-slate-700'}`}>{n}</span>
             </Link>

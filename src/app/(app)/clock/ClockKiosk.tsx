@@ -129,6 +129,8 @@ export function ClockKiosk({ employees, breakSlots, requirePhoto, requireLocatio
   useEffect(() => () => { if (resetTimer.current) clearTimeout(resetTimer.current); }, []);
 
   return (
+    // "theme-light": the kiosk keeps its light look in dark mode (full-bleed light panel under the top bar).
+    <div className="theme-light -mx-4 -my-5 min-h-[calc(100dvh-3.5rem)] bg-[#eef0f3] px-4 py-5 text-slate-900 sm:-mx-6 sm:px-6 lg:-mx-8 lg:-my-6 lg:px-8 lg:py-6">
     <div className="mx-auto max-w-5xl space-y-5">
       <div className="card px-4 py-6 sm:py-8">
         <LiveClock />
@@ -294,6 +296,7 @@ export function ClockKiosk({ employees, breakSlots, requirePhoto, requireLocatio
           </table>
         </div>
       </div>
+    </div>
     </div>
   );
 }

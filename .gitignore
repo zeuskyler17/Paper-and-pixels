@@ -10,3 +10,9 @@ certs/
 # Database backups and recovery copies never go to git (customer data)
 backups/*
 !backups/.gitkeep
+
+# Other env files hold secrets (Supabase connection etc.)
+.env.*
+!.env.example
+.vercel
+logs/

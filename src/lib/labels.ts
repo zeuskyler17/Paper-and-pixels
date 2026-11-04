@@ -7,9 +7,12 @@ export const PAYMENT_STATUS: Record<string, string> = { UNPAID: 'Unpaid', PARTIA
 export const PAYMENT_TERMS: Record<string, string> = {
   FULL: 'Full payment', DOWNPAYMENT: 'Downpayment', PAY_AFTER: 'Pay after production', CREDIT: 'Credit',
 };
-export const PAYMENT_METHOD: Record<string, string> = {
+/** Ways money comes in or goes out (expenses, supplier payments, payroll, advance payments). */
+export const MONEY_METHODS: Record<string, string> = {
   CASH: 'Cash', GCASH: 'GCash', MAYA: 'Maya', BANK_TRANSFER: 'Bank transfer', OTHER: 'Other',
 };
+/** Every payment method, including an order paid from the customer's advance payment (no new money). */
+export const PAYMENT_METHOD: Record<string, string> = { ...MONEY_METHODS, ADVANCE: 'Advance payment' };
 export const FILE_SOURCE: Record<string, string> = {
   NONE: 'No files', GMAIL: 'Gmail', USB: 'USB drive', MESSENGER: 'Messenger', OTHER: 'Other',
 };

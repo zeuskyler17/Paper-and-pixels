@@ -22,9 +22,10 @@ export async function changeJobStatus(
   deductOn: string,
   note?: string | null,
 ) {
-  const job = await tx.job.findUniqueOrThrow({ where: { id: jobId }, include: { order: true } });
+  const job = await tx.job.findUniqueOrThrow({ where: { id: jobId }, include: { order: true, helpers: { select: { userId: true } } } });
   if (job.status === to) return job;
-  if (!can(user, 'jobs_manage') && job.assignedToId !== user.id) throw new Error('This job is not assigned to you.');
+  const mine = job.assignedToId === user.id || job.helpers.some((h) => h.userId === user.id);
+  if (!can(user, 'jobs_manage') && !mine) throw new Error('This job is not assigned to you.');
   if (!can(user, 'jobs_manage') && to === 'CANCELLED') throw new Error('Only users who manage the production board can cancel a job.');
   if (job.order.status === 'CANCELLED') throw new Error('The order for this job was cancelled.');
   if (to !== 'PENDING' && to !== 'CANCELLED' && !job.assignedToId) {

@@ -3,9 +3,10 @@ import { peso } from '@/lib/money';
 import { Card } from '@/components/ui';
 import type { PnlMonth } from './_pnl';
 
-const INCOME = '#15803d';   // emerald-700
-const SPEND = '#b91c1c';    // red-700
-const PROFIT = '#1452d9';   // brand-600
+// Series colours follow the theme (see globals.css: deeper on light, brighter on dark).
+const INCOME = 'var(--pnl-income)';
+const SPEND = 'var(--pnl-spend)';
+const PROFIT = 'var(--pnl-profit)';
 const LOSS = '#f59e0b';     // amber-500
 
 /** Short peso for axis ticks: ₱12.5k, ₱1.2M. */
@@ -52,11 +53,11 @@ export function PnlChart({ months, span }: { months: PnlMonth[]; span: number })
     <Card
       title="Profit & loss"
       actions={
-        <span className="flex items-center gap-1 text-xs">
+        <span className="flex flex-wrap items-center justify-end gap-1 text-xs">
           {[6, 12, 24].map((n) => (
-            <Link key={n} href={`/dashboard?pnl=${n}`} className={`rounded px-2 py-0.5 font-semibold ${span === n ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{n} mo</Link>
+            <Link key={n} href={`/dashboard?pnl=${n}`} className={`whitespace-nowrap rounded px-2 py-0.5 font-semibold ${span === n ? 'seg-on' : 'text-slate-600 hover:bg-slate-100'}`}>{n} mo</Link>
           ))}
-          <Link href="/reports/profit" className="link ml-2">Full report</Link>
+          <Link href="/reports/profit" className="link ml-2 whitespace-nowrap">Full report</Link>
         </span>
       }
     >
@@ -71,27 +72,27 @@ export function PnlChart({ months, span }: { months: PnlMonth[]; span: number })
         <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Monthly income, spending and profit" className="h-auto w-full font-mono">
           {ticks.map((v) => (
             <g key={v}>
-              <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} stroke={v === 0 ? '#94a3b8' : '#e2e8f0'} strokeWidth={v === 0 ? 1.2 : 1} />
-              <text x={padL - 8} y={y(v) + 4} textAnchor="end" fontSize="11" fill="#64748b">{short(v)}</text>
+              <line x1={padL} x2={W - padR} y1={y(v)} y2={y(v)} className={v === 0 ? 'stroke-slate-400' : 'stroke-slate-200'} strokeWidth={v === 0 ? 1.2 : 1} strokeDasharray={v === 0 ? undefined : '3 4'} />
+              <text x={padL - 8} y={y(v) + 4} textAnchor="end" fontSize="11" className="fill-slate-500">{short(v)}</text>
             </g>
           ))}
           {months.map((m, i) => {
             const cx = x0(i), sp = spending(m);
             const bar = (v: number, dx: number, color: string, title: string) => v > 0 && (
-              <rect x={cx + dx} y={y(v)} width={barW} height={Math.max(1.5, y(0) - y(v))} rx={2} fill={color}><title>{title}</title></rect>
+              <rect x={cx + dx} y={y(v)} width={barW} height={Math.max(1.5, y(0) - y(v))} rx={3} fill={color} fillOpacity={0.9}><title>{title}</title></rect>
             );
             return (
               <g key={m.key}>
                 {bar(m.sales, -barW - gap / 2, INCOME, `${m.label} ${m.year} — Income ${peso(m.sales)}`)}
                 {bar(sp, gap / 2, SPEND, `${m.label} ${m.year} — Spending ${peso(sp)} (expenses ${peso(m.expenses)} + materials ${peso(m.materials)})`)}
-                <text x={cx} y={H - padB + 16} textAnchor="middle" fontSize="11" fill="#475569">{m.label}</text>
-                {(i === 0 || m.label === 'Jan') && <text x={cx} y={H - padB + 29} textAnchor="middle" fontSize="10" fill="#94a3b8">{m.year}</text>}
+                <text x={cx} y={H - padB + 16} textAnchor="middle" fontSize="11" className="fill-slate-600">{m.label}</text>
+                {(i === 0 || m.label === 'Jan') && <text x={cx} y={H - padB + 29} textAnchor="middle" fontSize="10" className="fill-slate-400">{m.year}</text>}
               </g>
             );
           })}
           <polyline points={line} fill="none" stroke={PROFIT} strokeWidth={2.5} strokeLinejoin="round" strokeLinecap="round" />
           {months.map((m, i) => (
-            <circle key={m.key} cx={x0(i)} cy={y(m.profit)} r={4.5} fill={m.profit >= 0 ? PROFIT : LOSS} stroke="#fff" strokeWidth={1.5}>
+            <circle key={m.key} cx={x0(i)} cy={y(m.profit)} r={4.5} fill={m.profit >= 0 ? PROFIT : LOSS} className="stroke-surface" strokeWidth={2}>
               <title>{`${m.label} ${m.year} — Profit ${peso(m.profit)}`}</title>
             </circle>
           ))}
@@ -101,7 +102,7 @@ export function PnlChart({ months, span }: { months: PnlMonth[]; span: number })
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px] text-slate-600">
         <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: INCOME }} />Income — order totals after discounts</span>
         <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-sm" style={{ background: SPEND }} />Spending — expenses + materials used at cost</span>
-        <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: PROFIT }} />Profit — income − spending <span className="text-slate-400">(amber dot = loss)</span></span>
+        <span className="inline-flex items-center gap-1.5"><i className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: PROFIT }} />Profit — income − spending <span className="text-slate-500">(amber dot = loss)</span></span>
       </div>
     </Card>
   );

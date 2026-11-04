@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { prisma } from '@/lib/db';
+import { jobTitle, printJobInfo } from '@/lib/printJob';
 import { requireUser, can } from '@/lib/auth';
 import { peso } from '@/lib/money';
 import { fmtDate, fmtDateTime, isOverdue, toDateInput } from '@/lib/dates';
@@ -9,8 +10,10 @@ import {
 } from '@/lib/labels';
 import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { Badge, Card, DL, Empty, Field, PageHeader, Select, StatusBadge, TableWrap } from '@/components/ui';
-import { addPayment, cancelOrder, markDelivered, setOrderStatus, updateOrderHeader, voidPayment } from '../actions';
+import { addPayment, cancelOrder, markDelivered, setOrderStatus, updateOrderHeader, updatePayment, voidPayment } from '../actions';
 import { DiscountFields } from './DiscountFields';
+import { VoidPaymentFields } from './VoidPaymentFields';
+import { advanceBalance } from '@/lib/advance';
 import { getPointsConfig } from '@/lib/points';
 import { PaymentMethodFields } from '@/components/PaymentMethodFields';
 import { accountLabel } from '@/lib/paymentAccounts';
@@ -26,8 +29,8 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
       customer: true,
       createdBy: { select: { name: true } },
       discountApprovedBy: { select: { name: true } },
-      items: { orderBy: { id: 'asc' }, include: { specs: { orderBy: { id: 'asc' } }, job: { include: { assignedTo: { select: { name: true } } } } } },
-      payments: { orderBy: { paidAt: 'asc' }, include: { receivedBy: { select: { name: true } }, voidedBy: { select: { name: true } }, voidApprovedBy: { select: { name: true } }, account: true } },
+      items: { orderBy: { id: 'asc' }, include: { specs: { orderBy: { id: 'asc' } }, jobs: { orderBy: { kind: 'asc' }, include: { assignedTo: { select: { name: true } } } } } },
+      payments: { orderBy: { paidAt: 'asc' }, include: { receivedBy: { select: { name: true } }, voidedBy: { select: { name: true } }, voidApprovedBy: { select: { name: true } }, account: true, depositUses: { include: { deposit: { select: { id: true, receiptNo: true } } } }, combinedPayment: { select: { id: true, receiptNo: true, amount: true } } } },
       deliveries: { orderBy: { createdAt: 'asc' } },
     },
   });
@@ -38,11 +41,16 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
     select: { id: true, method: true, label: true, accountNumber: true },
   });
 
+  const advance = order.customer.isInternal ? 0 : await advanceBalance(prisma, order.customerId);
+  // Combined balance: all of this customer's unpaid orders as one total (shown when the option is on).
+  const combined = order.customer.combineBalances && !order.customer.isInternal && !(order.customer.balanceHidden && !user.isAdmin)
+    ? await prisma.order.aggregate({ where: { customerId: order.customerId, status: { not: 'CANCELLED' }, balance: { gt: 0 } }, _sum: { balance: true }, _count: true })
+    : null;
   const cancelled = order.status === 'CANCELLED';
   const delivered = order.status === 'DELIVERED';
   const open = !cancelled && !delivered;
   const overdue = (order.status === 'PENDING' || order.status === 'IN_PRODUCTION') && isOverdue(order.targetDate);
-  const jobs = order.items.filter((i) => i.job).map((i) => ({ ...i.job!, item: i }));
+  const jobs = order.items.flatMap((i) => i.jobs.map((j) => ({ ...j, item: i })));
 
   return (
     <div className="space-y-4">
@@ -97,6 +105,15 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             <Row k="Paid" v={peso(order.amountPaid)} />
             <Row k="Balance" v={peso(order.balance)} bold tone={order.balance > 0 ? 'text-red-600' : 'text-emerald-600'} />
           </dl>
+          {combined && (
+            <Link href={`/customers/${order.customerId}#combined`} className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] transition hover:border-slate-300">
+              <span>
+                <span className="block text-[10.5px] font-semibold uppercase tracking-[0.08em] text-slate-500">Combined balance</span>
+                <span className="text-slate-600">{combined._count} unpaid order{combined._count === 1 ? '' : 's'} of {order.customer.name}</span>
+              </span>
+              <span className={`font-mono text-[16px] font-semibold tabular-nums ${(combined._sum.balance ?? 0) > 0 ? 'text-red-600' : 'text-emerald-600'}`}>{peso(combined._sum.balance ?? 0)}</span>
+            </Link>
+          )}
         </Card>
       </div>
 
@@ -106,9 +123,10 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
             <thead><tr><th>Item</th><th>Specifications</th><th className="text-right">Qty</th><th className="text-right">Unit price</th><th className="text-right">Line total</th></tr></thead>
             <tbody>
               {order.items.map((it) => (
-                <tr key={it.id}>
+                <tr key={it.id} className={it.voidedAt ? 'text-slate-400 line-through' : ''}>
                   <td className="min-w-[10rem]">
                     <div className="font-medium">{it.description}</div>
+                    {it.voidedAt && <div className="text-xs text-red-700 no-underline [text-decoration:none]">VOID {fmtDateTime(it.voidedAt)} — {it.voidReason}</div>}
                     {it.widthFt != null && it.heightFt != null && <div className="text-xs text-slate-500">{it.widthFt} × {it.heightFt} ft</div>}
                     {it.fileSource !== 'NONE' && <div className="text-xs text-slate-500">Files: {FILE_SOURCE[it.fileSource]}{it.fileSourceNote ? ` — ${it.fileSourceNote}` : ''}</div>}
                   </td>
@@ -139,7 +157,7 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
               {jobs.map((j) => (
                 <li key={j.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
                   <div>
-                    <Link href={`/jobs/${j.id}`} className="link">Job #{j.id}</Link> · {j.item.description}
+                    <Link href={`/jobs/${j.id}`} className="link">Job #{j.id}</Link> · {jobTitle(j.kind, j.item)}{j.kind === 'PRINT' ? ` — ${printJobInfo(j.item).detail}` : ''}
                     <div className="text-xs text-slate-500">{j.assignedTo ? `Assigned to ${j.assignedTo.name}` : 'Not assigned'} · due {fmtDate(j.dueDate)}</div>
                   </div>
                   <StatusBadge value={j.status} labels={JOB_STATUS} />
@@ -179,16 +197,27 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                   <tr key={p.id}>
                     <td className={p.voided ? 'text-slate-400 line-through' : ''}>{p.receiptNo}</td>
                     <td className={`whitespace-nowrap ${p.voided ? 'text-slate-400 line-through' : ''}`}>{fmtDateTime(p.paidAt)}</td>
-                    <td className={p.voided ? 'text-slate-400 line-through' : ''}>{PAYMENT_METHOD[p.method]}{p.reference ? ` · ${p.reference}` : ''}{p.account && <div className="text-[11.5px] text-slate-500">to {accountLabel(p.account)}</div>}</td>
+                    <td className={p.voided ? 'text-slate-400 line-through' : ''}>{PAYMENT_METHOD[p.method]}{p.reference ? ` · ${p.reference}` : ''}{p.account && <div className="text-[11.5px] text-slate-500">to {accountLabel(p.account)}</div>}{p.depositUses.length > 0 && <div className="text-[11.5px] text-slate-500">from {p.depositUses.map((u, i) => <span key={u.id}>{i > 0 && ', '}<Link href={`/print/advance/${u.deposit.id}`} className="link">{u.deposit.receiptNo}</Link> ({peso(u.amount)})</span>)}</div>}{p.notes && <div className="text-[11.5px] italic text-slate-600">{p.notes}</div>}{p.combinedPayment && <div className="text-[11.5px] text-slate-500">share of combined payment <Link href={`/print/combined/${p.combinedPayment.id}`} className="link">{p.combinedPayment.receiptNo}</Link> ({peso(p.combinedPayment.amount)})</div>}</td>
                     <td>{p.receivedBy.name}</td>
                     <td className={`text-right whitespace-nowrap ${p.voided ? 'text-slate-400 line-through' : 'font-medium'}`}>{peso(p.amount)}</td>
                     <td className="min-w-[10rem] text-right">
                       <div className="flex flex-wrap items-center justify-end gap-2">
                         <Link href={`/print/receipt/${p.id}`} className="link text-xs">Receipt</Link>
+                        {!p.voided && !cancelled && (
+                          <details className="text-left">
+                            <summary className="cursor-pointer text-xs font-medium text-brand-700">Edit</summary>
+                            <ActionForm action={updatePayment.bind(null, p.id)} className="mt-1 flex w-64 flex-col gap-1">
+                              <PaymentMethodFields accounts={accounts} defaultMethod={p.method} defaultAccountId={p.accountId} />
+                              <label className="block"><span className="label">Reference no.</span><input name="reference" defaultValue={p.reference ?? ''} className="input" placeholder="GCash / bank ref" /></label>
+                              <SubmitButton className="btn-secondary btn-sm">Save</SubmitButton>
+                            </ActionForm>
+                          </details>
+                        )}
                         {!p.voided && (
                           <details className="text-left">
                             <summary className="cursor-pointer text-xs font-medium text-red-700">Void</summary>
-                            <ActionForm action={voidPayment.bind(null, p.id)} confirm={`Void receipt ${p.receiptNo} (${peso(p.amount)})?`} className="mt-1 flex w-56 flex-col gap-1">
+                            <ActionForm action={voidPayment.bind(null, p.id)} confirm={`Void receipt ${p.receiptNo} (up to ${peso(p.amount)})?`} className="mt-1 flex w-64 flex-col gap-1">
+                              <VoidPaymentFields paymentAmount={p.amount} items={order.items.filter((it) => !it.voidedAt).map((it) => ({ id: it.id, label: `${it.quantity} × ${it.description}`, amount: it.lineTotal }))} />
                               <input name="reason" className="input" placeholder="Reason *" required />
                               <input name="approvalPin" type="password" inputMode="numeric" pattern="\d{4,8}" maxLength={8} autoComplete="off" className="input" placeholder="Owner approval PIN *" required />
                               <SubmitButton className="btn-danger btn-sm">Void payment</SubmitButton>
@@ -211,10 +240,13 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
         {!cancelled && order.balance > 0 && (
           <div className="mt-4 border-t border-slate-100 pt-4">
             <h3 className="mb-2 text-sm font-semibold">Add payment</h3>
+            {combined && (combined._count ?? 0) > 1 && (
+              <p className="mb-2 text-xs text-slate-500">This payment goes to {order.orderNo} only. To take one payment for all {combined._count} unpaid orders, use <Link href={`/customers/${order.customerId}#combined`} className="link">Combined balance</Link> on the customer page.</p>
+            )}
             <ActionForm action={addPayment.bind(null, order.id)} resetOnSuccess>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                 <Field label="Amount (₱) *"><input name="amount" className="input" inputMode="decimal" placeholder={(order.balance / 100).toFixed(2)} required /></Field>
-                <PaymentMethodFields accounts={accounts} />
+                <PaymentMethodFields accounts={accounts} advance={advance} />
                 <Field label="Reference no."><input name="reference" className="input" placeholder="GCash / bank ref" /></Field>
                 <Field label="Notes"><input name="notes" className="input" /></Field>
               </div>

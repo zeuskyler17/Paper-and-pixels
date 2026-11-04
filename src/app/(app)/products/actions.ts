@@ -97,6 +97,7 @@ async function readProduct(fd: FormData) {
     basePrice: money(fd, 'basePrice', 'Base price'),
     unit: str(fd, 'unit') || (pricingMode === 'PER_SQFT' ? 'sq ft' : 'pc'),
     active: bool(fd, 'active'),
+    printJob: bool(fd, 'printJob'),
   };
 }
 

@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { applySpecialPrice, computeUnitPrice, type Selection } from '@/lib/pricing';
+import { applySpecialPrice, canTwoTone, computeUnitPrice, coverFamily, fullCoverValue, isTwoToneOption, joinCover, splitCover, pickSpecialPrice, type Selection } from '@/lib/pricing';
 import { centavosToInput, peso, toCentavos, toCentavosOrZero } from '@/lib/money';
-import { FILE_SOURCE, PAYMENT_METHOD, PAYMENT_TERMS, options } from '@/lib/labels';
+import { FILE_SOURCE, PAYMENT_METHOD, PAYMENT_TERMS, options, MONEY_METHODS } from '@/lib/labels';
 import type { CreateOrderInput, PosCustomer, PosProduct } from '../_lib';
 import type { AccountOption } from '@/components/PaymentMethodFields';
+import { ProductPicker } from '@/components/ProductPicker';
 import { createOrder, quickCreateCustomer, searchCustomers } from '../actions';
 
 type Line = {
@@ -43,11 +44,6 @@ function defaultSelection(p: PosProduct): Line['selection'] {
 export function PosForm({ products, initialCustomer, today, accounts = [], points: pointsCfg = { enabled: false, value: 0, weekCap: 0 } }: { products: PosProduct[]; initialCustomer: PosCustomer | null; today: string; accounts?: AccountOption[]; points?: { enabled: boolean; value: number; weekCap: number } }) {
   const router = useRouter();
   const productMap = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
-  const groups = useMemo(() => {
-    const g = new Map<string, PosProduct[]>();
-    for (const p of products) g.set(p.categoryName, [...(g.get(p.categoryName) ?? []), p]);
-    return [...g.entries()];
-  }, [products]);
 
   // ── customer
   const [customer, setCustomer] = useState<PosCustomer | null>(initialCustomer);
@@ -72,18 +68,32 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
   const [accountId, setAccountId] = useState<number | ''>('');
   const accountChoices = accounts.filter((a) => a.method === method);
   const [reference, setReference] = useState('');
+  // Split payment: a second amount by another method (half cash, half GCash…)
+  const [splitOn, setSplitOn] = useState(false);
+  const [paid2Input, setPaid2Input] = useState('');
+  const [method2, setMethod2] = useState('GCASH');
+  const [accountId2, setAccountId2] = useState<number | ''>('');
+  const accountChoices2 = accounts.filter((a) => a.method === method2);
+  const [reference2, setReference2] = useState('');
+  // Methods offered: cash / GCash / … plus "Advance payment" when the customer has money on account.
+  const advance = customer && !customer.isInternal ? customer.advance ?? 0 : 0;
+  const methodOptions = [...options(MONEY_METHODS), ...(advance > 0 ? [{ value: 'ADVANCE', label: `${PAYMENT_METHOD.ADVANCE} (${peso(advance)} available)` }] : [])];
+  const pickCustomer = (c: PosCustomer | null) => {
+    setCustomer(c);
+    if (!(c && !c.isInternal && (c.advance ?? 0) > 0)) { if (method === 'ADVANCE') setMethod('CASH'); if (method2 === 'ADVANCE') setMethod2('GCASH'); }
+  };
 
   const [error, setError] = useState<string | null>(null);
   const [saving, startSaving] = useTransition();
 
   // ── live computation
-  const specialBy = new Map((customer?.isInternal ? [] : customer?.specialPrices ?? []).map((sp) => [sp.productId, sp]));
+  const specials = customer?.isInternal ? [] : customer?.specialPrices ?? [];
   const computed = lines.map((l) => {
     const p = l.productId ? productMap.get(l.productId) : undefined;
     if (!p) return { product: undefined, suggested: 0, normal: 0, special: false, unit: 0, total: 0, errors: [] as string[], overridden: false, qty: 0 };
     const calc = computeUnitPrice(p, l.selection as Selection, p.pricingMode === 'PER_SQFT' ? Number(l.widthFt) : null, p.pricingMode === 'PER_SQFT' ? Number(l.heightFt) : null);
     // Customer's special price (owner-set) replaces the normal price.
-    const specialUnit = applySpecialPrice(calc.unitPrice, specialBy.get(p.id));
+    const specialUnit = applySpecialPrice(calc.unitPrice, pickSpecialPrice(specials, p.id, calc.specs.map((sp) => sp.optionValueId)));
     const res = { ...calc, unitPrice: specialUnit ?? calc.unitPrice };
     const override = l.priceInput.trim() === '' ? NaN : toCentavos(l.priceInput);
     const overridden = !customer?.isInternal && Number.isFinite(override) && override !== res.unitPrice;
@@ -107,8 +117,11 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
   const pointsUsed = canUsePoints ? Math.max(0, Math.floor(Number(pointsInput) || 0)) : 0;
   const pointsAmount = pointsUsed * pointsCfg.value;
   const total = afterDiscount - pointsAmount;
-  const paid = terms === 'FULL' ? total : toCentavosOrZero(paidInput);
-  const balance = total - (Number.isFinite(paid) ? paid : 0);
+  const paid2 = splitOn ? toCentavosOrZero(paid2Input) : 0;
+  // Full payment: the first part is whatever the second part leaves; other terms: both typed.
+  const paid1 = terms === 'FULL' ? Math.max(0, total - (Number.isFinite(paid2) ? paid2 : 0)) : toCentavosOrZero(paidInput);
+  const paid = (Number.isFinite(paid1) ? paid1 : 0) + (Number.isFinite(paid2) ? paid2 : 0);
+  const balance = total - paid;
 
   useEffect(() => {
     if (specialPct) {
@@ -152,8 +165,16 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
     else if (discount > 0 && !discountReason.trim()) problems.push('Enter a reason for the discount.');
     else if (needsPin && !discountPin) problems.push(specialAmount ? `The discount is more than ${customer?.name}'s special ${specialPct}% (${peso(specialAmount)}): ask the owner to enter their approval PIN.` : 'Ask the owner to enter their approval PIN for the discount.');
     if (pointsUsed > maxPoints) problems.push(`Use at most ${maxPoints} point(s) on this order.`);
-    if (paid > 0 && method !== 'CASH' && accountChoices.length > 0 && !accountId) problems.push(`Choose which ${PAYMENT_METHOD[method]} account received the payment.`);
-    if (!Number.isFinite(paid) || paid < 0) problems.push('Amount paid is not a valid amount.');
+    if (paid1 > 0 && method !== 'CASH' && accountChoices.length > 0 && !accountId) problems.push(`Choose which ${PAYMENT_METHOD[method]} account received the payment.`);
+    const fromAdvance = (method === 'ADVANCE' ? paid1 : 0) + (splitOn && method2 === 'ADVANCE' ? paid2 : 0);
+    if (fromAdvance > advance) problems.push(`${customer?.name} has only ${peso(advance)} of advance payment — ${peso(fromAdvance)} is more than that. Use another method for the rest (split payment).`);
+    if (splitOn) {
+      if (!Number.isFinite(paid2) || paid2 <= 0) problems.push('Split payment: enter the second amount, or turn off the split.');
+      else if (paid1 <= 0) problems.push('Split payment: enter the first amount too, or turn off the split.');
+      if (method2 === method) problems.push('Split payment: the two parts use the same method — just enter one amount.');
+      if (paid2 > 0 && method2 !== 'CASH' && accountChoices2.length > 0 && !accountId2) problems.push(`Choose which ${PAYMENT_METHOD[method2]} account received the second payment.`);
+    }
+    if (!Number.isFinite(paid1) || paid1 < 0 || !Number.isFinite(paid2) || paid2 < 0) problems.push('Amount paid is not a valid amount.');
     else if (paid > total) problems.push('Amount paid is more than the total.');
     else if (terms === 'DOWNPAYMENT' && paid <= 0 && total > 0) problems.push('Enter the downpayment amount.');
     if (problems.length) { setError(problems.join('\n')); return; }
@@ -185,10 +206,11 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
       discountPin: needsPin ? discountPin : '',
       pointsUsed,
       paymentTerms: terms,
-      amountPaid: paid,
+      amountPaid: paid1,
       method,
       accountId: accountId || null,
       reference,
+      split: splitOn && paid2 > 0 ? { amount: paid2, method: method2, accountId: accountId2 || null, reference: reference2 } : null,
     };
 
     startSaving(async () => {
@@ -203,7 +225,7 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
       {/* 1. Customer */}
       <section className="card p-4">
         <h2 className="mb-4 flex items-center gap-2.5 border-b border-slate-100 pb-3 text-[11.5px] font-semibold uppercase tracking-[0.08em] text-slate-700"><span className="grid h-5 w-5 place-items-center rounded-[3px] bg-graphite-800 font-mono text-[10.5px] text-white">1</span>Customer</h2>
-        <CustomerPicker customer={customer} onChange={setCustomer} />
+        <CustomerPicker customer={customer} onChange={pickCustomer} />
         {customer?.isInternal && (
           <p className="mt-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-[13px] text-amber-900"><b>Branch transfer.</b> {customer.name} is one of our branches: this order carries no prices, discount or payment — it only moves finished products to that branch. Production and delivery work as usual.</p>
         )}
@@ -220,23 +242,14 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
               <div key={l.key} className="rounded-md border border-slate-200 p-3">
                 <div className="mb-3 flex items-start gap-2">
                   <span className="mt-2 text-xs font-semibold text-slate-500">#{i + 1}</span>
-                  <select
-                    className="input flex-1"
-                    value={l.productId ?? ''}
-                    onChange={(e) => {
-                      const id = Number(e.target.value) || null;
+                  <ProductPicker
+                    products={products}
+                    value={l.productId ?? null}
+                    onChange={(id) => {
                       const np = id ? productMap.get(id) : undefined;
                       update(l.key, { productId: id, selection: np ? defaultSelection(np) : {}, priceInput: '', overrideReason: '', widthFt: '', heightFt: '' });
                     }}
-                    aria-label="Product"
-                  >
-                    <option value="">— choose product —</option>
-                    {groups.map(([cat, ps]) => (
-                      <optgroup key={cat} label={cat}>
-                        {ps.map((x) => <option key={x.id} value={x.id}>{x.name} — {peso(x.basePrice)}{x.pricingMode === 'PER_SQFT' ? '/sq ft' : ''}</option>)}
-                      </optgroup>
-                    ))}
-                  </select>
+                  />
                   {lines.length > 1 && (
                     <button type="button" className="btn-secondary btn-sm mt-1 text-red-700" onClick={() => setLines((ls) => ls.filter((x) => x.key !== l.key))}>
                       Remove
@@ -262,21 +275,75 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
                         const sel = l.selection[o.id];
                         const setSel = (v: number | number[] | null) => update(l.key, { selection: { ...l.selection, [o.id]: v } });
                         if (o.type === 'SELECT') {
+                          // Cover: "Two tone" shows a second dropdown (leather 012 / 001, tela H4 / H6…); stored as [first, second].
+                          // "Full cover (FC)" is a checkbox on top of the cover color (the FC value id rides along at the end of the array).
+                          const isCover = isTwoToneOption(o);
+                          const fcValue = isCover ? fullCoverValue(o) : undefined;
+                          const { tones, fc: isFc } = isCover ? splitCover(o, sel) : { tones: [typeof sel === 'number' ? sel : 0], fc: false };
+                          const pair = tones.length ? tones : [0];
+                          const twoTone = isCover && pair.length === 2;
+                          const store = (t: number[], f: boolean) => setSel(isCover ? joinCover(o, t, f) : t[0] || null);
+                          const optLabel = (v: (typeof o.values)[number]) => `${v.label}${v.priceDelta ? ` (${v.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(v.priceDelta))})` : ''}`;
+                          // Cover codes grouped by material; FC is not in the list (it is the checkbox).
+                          const groupOpts = (vals: typeof o.values) => {
+                            if (!isCover) return vals.map((v) => <option key={v.id} value={v.id}>{optLabel(v)}</option>);
+                            const fams: [string, string][] = [['leather', 'Leather'], ['tela', 'Tela'], ['other', 'T codes']];
+                            return fams.map(([fam, title]) => {
+                              const list = vals.filter((v) => coverFamily(v.label) === fam);
+                              return list.length ? <optgroup key={fam} label={title}>{list.map((v) => <option key={v.id} value={v.id}>{optLabel(v)}</option>)}</optgroup> : null;
+                            });
+                          };
+                          const opts = groupOpts(o.values);
+                          const setPair = (i: number, id: number) => {
+                            const next = [...pair]; next[i] = id;
+                            const [a, b] = next.map((x) => o.values.find((v) => v.id === x));
+                            if (i === 0 && a && b && !canTwoTone(a.label, b.label)) next[1] = 0; // leather ↔ tela: clear the 2nd tone
+                            store(twoTone ? next : [next[0]], isFc);
+                          };
                           return (
-                            <label key={o.id} className="block"><span className="label">{o.name}{o.required ? ' *' : ''}</span>
-                              <select className="input" value={typeof sel === 'number' ? sel : ''} onChange={(e) => setSel(e.target.value ? Number(e.target.value) : null)}>
-                                <option value="">{o.required ? '— choose —' : '— none —'}</option>
-                                {o.values.map((v) => <option key={v.id} value={v.id}>{v.label}{v.priceDelta ? ` (${v.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(v.priceDelta))})` : ''}</option>)}
-                              </select>
-                            </label>
+                            <div key={o.id} className="block">
+                              <span className="label flex items-center justify-between gap-2">
+                                <span>{o.name}{o.required ? ' *' : ''}</span>
+                                {isCover && (
+                                  <span className="flex items-center gap-3">
+                                    {fcValue && (
+                                      <label className="flex cursor-pointer items-center gap-1 normal-case text-slate-600">
+                                        <input type="checkbox" checked={isFc} onChange={(e) => store(pair, e.target.checked)} />
+                                        Full cover (FC){fcValue.priceDelta ? ` ${fcValue.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(fcValue.priceDelta))}` : ''}
+                                      </label>
+                                    )}
+                                    <label className="flex cursor-pointer items-center gap-1 normal-case text-slate-600">
+                                      <input type="checkbox" checked={twoTone} onChange={(e) => store(e.target.checked ? [pair[0] || 0, 0] : [pair[0] || 0], isFc)} /> Two tone
+                                    </label>
+                                  </span>
+                                )}
+                              </span>
+                              <div className={twoTone ? 'grid grid-cols-2 gap-1.5' : ''}>
+                                <select className="input" value={pair[0] || ''} onChange={(e) => setPair(0, Number(e.target.value) || 0)}>
+                                  <option value="">{o.required ? '— choose —' : '— none —'}</option>
+                                  {opts}
+                                </select>
+                                {twoTone && (() => {
+                                  // Leather (1, 2, 3…) never with tela (H1, H2…); T codes go with anything.
+                                  const firstV = o.values.find((v) => v.id === pair[0]);
+                                  const ok = firstV ? o.values.filter((v) => v.id !== pair[0] && canTwoTone(firstV.label, v.label)) : [];
+                                  const fam = firstV ? coverFamily(firstV.label) : null;
+                                  return (
+                                    <select className="input" value={pair[1] || ''} disabled={!firstV} onChange={(e) => setPair(1, Number(e.target.value) || 0)}>
+                                      <option value="">{!firstV ? '— pick 1st tone —' : `— 2nd tone${fam === 'leather' ? ' (no tela)' : fam === 'tela' ? ' (no leather)' : ''} —`}</option>
+                                      {groupOpts(ok)}
+                                    </select>
+                                  );
+                                })()}
+                              </div>
+                            </div>
                           );
                         }
                         if (o.type === 'MULTI') {
-                          // Add-ons: one dropdown per add-on; "+" adds another, "×" removes one. The same add-on can't be picked twice.
+                          // Add-ons: one dropdown per add-on; "+" adds another, "×" removes that row. The same add-on may be picked again (2× Extra Leave).
                           const ids = Array.isArray(sel) ? sel : [];
                           const label = (v: (typeof o.values)[number]) => `${v.label}${v.priceDelta ? ` (${v.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(v.priceDelta))})` : ''}`;
                           const rows = ids.length ? ids : [0];
-                          const left = o.values.filter((v) => !ids.includes(v.id));
                           return (
                             <div key={o.id} className="block">
                               <span className="label">{o.name}{o.required ? ' *' : ''}</span>
@@ -287,18 +354,18 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
                                       onChange={(e) => {
                                         const v = Number(e.target.value) || 0;
                                         const next = [...rows]; next[i] = v;
-                                        setSel(next.filter((x, j) => x > 0 && next.indexOf(x) === j));
+                                        setSel(next.filter((x) => x > 0));
                                       }}>
                                       <option value="">{o.required && i === 0 ? '— choose —' : '— none —'}</option>
-                                      {o.values.filter((v) => v.id === id || !ids.includes(v.id)).map((v) => <option key={v.id} value={v.id}>{label(v)}</option>)}
+                                      {o.values.map((v) => <option key={v.id} value={v.id}>{label(v)}</option>)}
                                     </select>
                                     {ids.length > 0 && id > 0 && (
                                       <button type="button" className="btn-secondary shrink-0 px-3" title={`Remove this ${o.name.toLowerCase()}`} aria-label="Remove"
-                                        onClick={() => setSel(ids.filter((x) => x !== id))}>×</button>
+                                        onClick={() => setSel(ids.filter((_, j) => j !== i))}>×</button>
                                     )}
                                   </div>
                                 ))}
-                                {ids.length > 0 && !ids.includes(0) && left.length > 0 && (
+                                {ids.length > 0 && !ids.includes(0) && (
                                   <button type="button" className="btn-secondary px-3 text-[13px]" onClick={() => setSel([...ids, 0])}>+ Add another</button>
                                 )}
                               </div>
@@ -434,23 +501,23 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
               {options(PAYMENT_TERMS).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </label>
-          <label className="block"><span className="label">Amount paid now (₱)</span>
+          <label className="block"><span className="label">{terms === 'FULL' ? 'Amount paid now (₱)' : terms === 'DOWNPAYMENT' ? 'Downpayment now (₱)' : 'Paid now, if any (₱)'}</span>
             <input
               className="input"
               inputMode="decimal"
-              value={terms === 'FULL' ? centavosToInput(total) : paidInput}
+              value={terms === 'FULL' ? centavosToInput(paid1) : paidInput}
               readOnly={terms === 'FULL'}
               placeholder="0.00"
               onChange={(e) => setPaidInput(e.target.value)}
             />
           </label>
           <label className="block"><span className="label">Method</span>
-            <select className="input" value={method} onChange={(e) => { setMethod(e.target.value); setAccountId(''); }} disabled={!(paid > 0)}>
-              {options(PAYMENT_METHOD).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            <select className="input" value={method} onChange={(e) => { setMethod(e.target.value); setAccountId(''); }}>
+              {methodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </label>
-          {paid > 0 && method !== 'CASH' && accountChoices.length > 0 && (
-            <label className="block"><span className="label">Received in *</span>
+          {method !== 'CASH' && accountChoices.length > 0 && (
+            <label className="block"><span className="label">Received in{paid > 0 ? ' *' : ''}</span>
               <select className="input" value={accountId} onChange={(e) => setAccountId(e.target.value ? Number(e.target.value) : '')}>
                 <option value="">— which {PAYMENT_METHOD[method]} account? —</option>
                 {accountChoices.map((a) => <option key={a.id} value={a.id}>{a.label}{a.accountNumber ? ` · ${a.accountNumber}` : ''}</option>)}
@@ -458,9 +525,43 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
             </label>
           )}
           <label className="block"><span className="label">Reference no.</span>
-            <input className="input" value={reference} placeholder="GCash / bank ref" onChange={(e) => setReference(e.target.value)} disabled={!(paid > 0)} />
+            <input className="input" value={reference} placeholder="GCash / bank ref" onChange={(e) => setReference(e.target.value)} />
           </label>
         </div>
+        {!splitOn ? (
+          <button type="button" className="btn-secondary btn-sm mt-3" onClick={() => { setSplitOn(true); setMethod2(method === 'CASH' ? 'GCASH' : 'CASH'); }}>+ Split payment (part cash, part GCash / other)</button>
+        ) : (
+          <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <span className="text-[11.5px] font-semibold uppercase tracking-[0.08em] text-slate-700">Second payment (split)</span>
+              <button type="button" className="text-xs text-slate-500 underline" onClick={() => { setSplitOn(false); setPaid2Input(''); setAccountId2(''); setReference2(''); }}>Remove split</button>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <label className="block"><span className="label">Second amount (₱) *</span>
+                <input className="input" inputMode="decimal" value={paid2Input} placeholder="0.00" onChange={(e) => setPaid2Input(e.target.value)} />
+              </label>
+              <label className="block"><span className="label">Method *</span>
+                <select className="input" value={method2} onChange={(e) => { setMethod2(e.target.value); setAccountId2(''); }}>
+                  {methodOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </label>
+              {method2 !== 'CASH' && accountChoices2.length > 0 && (
+                <label className="block"><span className="label">Received in *</span>
+                  <select className="input" value={accountId2} onChange={(e) => setAccountId2(e.target.value ? Number(e.target.value) : '')}>
+                    <option value="">— which {PAYMENT_METHOD[method2]} account? —</option>
+                    {accountChoices2.map((a) => <option key={a.id} value={a.id}>{a.label}{a.accountNumber ? ` · ${a.accountNumber}` : ''}</option>)}
+                  </select>
+                </label>
+              )}
+              <label className="block"><span className="label">Reference no.</span>
+                <input className="input" value={reference2} placeholder="GCash / bank ref" onChange={(e) => setReference2(e.target.value)} />
+              </label>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              {terms === 'FULL' ? 'The first amount adjusts itself so both parts add up to the total.' : 'Both amounts are added together as the amount paid now.'} Each part gets its own receipt.
+            </p>
+          </div>
+        )}
       </section>
 
       {error && <p className="whitespace-pre-line rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}

@@ -10,7 +10,7 @@ import { audit } from '@/lib/audit';
 import { categoryLabel, isOtherCategory } from './_other';
 import { peso, toCentavos } from '@/lib/money';
 import { fmtDate, parseDateInput } from '@/lib/dates';
-import { PAYMENT_METHOD } from '@/lib/labels';
+import { PAYMENT_METHOD, MONEY_METHODS } from '@/lib/labels';
 import { saveUpload } from '@/lib/uploads';
 
 // ───────────── Expenses ─────────────
@@ -25,7 +25,7 @@ export async function createExpense(_prev: ActionState, fd: FormData): Promise<A
     const amount = toCentavos(str(fd, 'amount'));
     if (!Number.isFinite(amount) || amount <= 0) throw new Error('Enter an amount greater than zero.');
     const paidVia = str(fd, 'paidVia');
-    if (!(paidVia in PAYMENT_METHOD)) throw new Error('Choose how it was paid.');
+    if (!(paidVia in MONEY_METHODS)) throw new Error('Choose how it was paid.');
     const notes = optStr(fd, 'notes');
 
     await prisma.$transaction(async (tx) => {

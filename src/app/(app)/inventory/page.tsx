@@ -71,7 +71,7 @@ export default async function InventoryPage({ searchParams }: { searchParams: SP
     <div className="mb-3 flex flex-wrap gap-1 border-b border-slate-100 pb-3">
       {TABS.map((t) => (
         <Link key={t.value} href={tabHref(t.value)}
-          className={`rounded-md px-3 py-1.5 text-sm font-medium ${!daily && (level === t.value || (!validLevel && !t.value)) ? 'bg-slate-900 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>
+          className={`rounded-md px-3 py-1.5 text-sm font-medium ${!daily && (level === t.value || (!validLevel && !t.value)) ? 'seg-on' : 'text-slate-600 hover:bg-slate-100'}`}>
           {t.label}
         </Link>
       ))}
@@ -92,8 +92,15 @@ export default async function InventoryPage({ searchParams }: { searchParams: SP
     ...(inactive ? {} : { active: true }),
     ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { sku: { contains: q, mode: 'insensitive' } }] } : {}),
   };
-  const materials = await prisma.material.findMany({
-    where, orderBy: [{ level: 'asc' }, { name: 'asc' }], include: { supplier: { select: { id: true, name: true } } },
+  const found = await prisma.material.findMany({
+    where, orderBy: [{ name: 'asc' }], include: { supplier: { select: { id: true, name: true } } },
+  });
+  // Listed by SKU / code in natural alphanumeric order (A-2 before A-10, 1 before 10); items without a code come last, by name.
+  const natural = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+  const materials = found.sort((x, y) => {
+    if (x.sku && y.sku) return natural.compare(x.sku.trim(), y.sku.trim()) || natural.compare(x.name, y.name);
+    if (x.sku || y.sku) return x.sku ? -1 : 1;
+    return natural.compare(x.name, y.name);
   });
 
   const isLow = (m: { stock: number; reorderLevel: number }) => m.stock <= m.reorderLevel;

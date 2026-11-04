@@ -1,6 +1,6 @@
 // Types and pure helpers shared by the POS client screen and the order server actions.
 // No server-only imports here: this file is bundled into the client.
-import type { SpecialPrice, PricingOption, PricingProduct, Selection } from '@/lib/pricing';
+import { isTwoToneOption, joinCover, splitCover, type SpecialPrice, type PricingOption, type PricingProduct, type Selection } from '@/lib/pricing';
 
 export type PosOption = PricingOption & { defaultValue: number | null };
 
@@ -8,6 +8,8 @@ export type PosProduct = Omit<PricingProduct, 'options'> & {
   categoryId: number;
   categoryName: string;
   requiresProduction: boolean;
+  /** Lay Flat albums: the order line also creates a separate print job. */
+  printJob: boolean;
   unit: string;
   description: string | null;
   options: PosOption[];
@@ -19,6 +21,8 @@ export type PosCustomer = {
   specialPrices?: SpecialPrice[];
   /** Loyalty points balance. */
   points?: number;
+  /** Unused advance payment (centavos) — offered as the "Advance payment" method. */
+  advance?: number;
 };
 
 export type OrderLineInput = {
@@ -53,6 +57,8 @@ export type CreateOrderInput = {
   /** Receiving GCash / Maya / bank account (required when such accounts are set up). */
   accountId?: number | null;
   reference: string;
+  /** Split payment: a second amount paid now by another method (e.g. half cash, half GCash). */
+  split?: { amount: number; method: string; accountId?: number | null; reference: string } | null;
 };
 
 export type JsonResult = { error?: string; ok?: string; id?: number };
@@ -65,6 +71,7 @@ type ProductRow = {
   pricingMode: 'FIXED' | 'PER_SQFT';
   basePrice: number;
   unit: string;
+  printJob: boolean;
   categoryId: number;
   category: { name: string; requiresProduction: boolean };
   options: {
@@ -94,6 +101,7 @@ export function toPosProduct(p: ProductRow): PosProduct {
     categoryId: p.categoryId,
     categoryName: p.category.name,
     requiresProduction: p.category.requiresProduction,
+    printJob: p.printJob,
     options: p.options.map((o) => ({
       id: o.id,
       name: o.name,
@@ -120,14 +128,20 @@ export function sanitizeSelection(product: PosProduct, raw: Record<string, unkno
     const v = (src as Record<string, unknown>)[String(opt.id)];
     if (v === null || v === undefined || v === '') continue;
     if (opt.type === 'SELECT') {
-      const id = Number(v);
-      if (!opt.values.some((x) => x.id === id)) errors.push(`${product.name}: the chosen ${opt.name} is no longer available.`);
-      else selection[opt.id] = id;
+      // Cover: [first, second] tone ids (second may be 0 while the form's second dropdown is still blank) + the FC value id when ticked.
+      const raw = (Array.isArray(v) ? v : [v]).map(Number).filter((id) => id > 0);
+      if (raw.length === 0) continue;
+      if (raw.some((id) => !opt.values.some((x) => x.id === id))) { errors.push(`${product.name}: the chosen ${opt.name} is no longer available.`); continue; }
+      if (isTwoToneOption(opt)) {
+        const { tones, fc } = splitCover(opt, raw);
+        const t = tones.slice(0, 2);
+        selection[opt.id] = joinCover(opt, t.length === 2 && t[0] === t[1] ? [t[0]] : t, fc);
+      } else selection[opt.id] = raw[0];
     } else if (opt.type === 'MULTI') {
       const ids = Array.isArray(v) ? v.map(Number).filter((id) => id > 0) : []; // a blank add-on row on the form is 0
       const bad = ids.filter((id) => !opt.values.some((x) => x.id === id));
       if (bad.length) errors.push(`${product.name}: a chosen ${opt.name} is no longer available.`);
-      selection[opt.id] = [...new Set(ids.filter((id) => !bad.includes(id)))];
+      selection[opt.id] = ids.filter((id) => !bad.includes(id)); // repeats allowed (2× Extra Leave)
     } else {
       const n = Number(v);
       if (!Number.isFinite(n) || n < 0) errors.push(`${product.name}: ${opt.name} must be a number.`);

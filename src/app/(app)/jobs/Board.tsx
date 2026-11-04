@@ -3,11 +3,13 @@
 import Link from 'next/link';
 import { useEffect, useState, useTransition } from 'react';
 import { JOB_COLUMNS, JOB_STATUS } from '@/lib/labels';
-import { assignWorker, moveJob, takeJob } from './actions';
+import { assignWorker, moveJob, setHelpers, takeJob } from './actions';
 import { ReleaseOrderButton } from '@/components/ReleaseOrderButton';
 
 export type JobCard = {
   id: number;
+  /** MAIN = the product; PRINT = a Lay Flat album's pages. */
+  kind: 'MAIN' | 'PRINT';
   status: string;
   orderId: number;
   orderNo: string;
@@ -23,6 +25,8 @@ export type JobCard = {
   elapsedDays: number;
   assignedToId: number | null;
   assignedName: string | null;
+  /** Extra workers besides the lead. */
+  helpers: { id: number; name: string }[];
   /** "Jc · Oct 17, 2026, 9:30 AM" — who delegated the job to the worker. */
   assignedBy: string | null;
   /** Latest status move: who moved it, to what, when. */
@@ -109,6 +113,7 @@ export function Board({ jobs, workers, canAssign, canRelease = false, showCancel
       onDragEnd={() => { setDragId(null); setOverCol(null); }}
       onMove={(to) => move(job, to)}
       onAssign={(w) => assign(job, w)}
+      onHelpers={(ids) => run(job.id, () => setHelpers(job.id, ids))}
       onTake={() => run(job.id, () => takeJob(job.id))}
     />
   );
@@ -190,9 +195,9 @@ export function Board({ jobs, workers, canAssign, canRelease = false, showCancel
   );
 }
 
-function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onDragStart, onDragEnd, onMove, onAssign, onTake }: {
+function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onDragStart, onDragEnd, onMove, onAssign, onHelpers, onTake }: {
   job: JobCard; workers: Worker[]; canAssign: boolean; canRelease: boolean; busy: boolean; draggable: boolean;
-  onDragStart: () => void; onDragEnd: () => void; onMove: (to: string) => void; onAssign: (workerId: string) => void; onTake: () => void;
+  onDragStart: () => void; onDragEnd: () => void; onMove: (to: string) => void; onAssign: (workerId: string) => void; onHelpers: (ids: number[]) => void; onTake: () => void;
 }) {
   // A worker looking at an unassigned job: they can claim it, but not move it until it is theirs.
   const claimable = !canAssign && job.assignedToId === null && job.status === 'PENDING';
@@ -214,7 +219,7 @@ function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onD
         <span className="text-xs text-slate-500" title="Days since the job was created">{job.elapsedDays}d</span>
       </div>
       <div className="text-xs text-slate-600">{job.customer}</div>
-      <div className="mt-1 font-medium">{job.quantity} × {job.product}</div>
+      <div className="mt-1 font-medium">{job.kind === 'PRINT' && <span className="mr-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-sky-800">Print</span>}{job.quantity} × {job.product}</div>
       <div className="text-xs text-slate-500">{job.category}{job.size ? ` · ${job.size}` : ''}</div>
       {job.specs.length > 0 && (
         <ul className="mt-1 space-y-0.5 text-xs text-slate-700">
@@ -227,7 +232,7 @@ function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onD
         <span className={job.overdue ? 'font-semibold text-red-600' : 'text-slate-600'}>
           Due: {job.due ?? '—'}{job.overdue && ' (overdue)'}
         </span>
-        {!canAssign && <span className={job.assignedName ? 'text-slate-600' : 'font-semibold text-amber-700'}>Worker: {job.assignedName ?? 'Unassigned — available'}</span>}
+        {!canAssign && <span className={job.assignedName ? 'text-slate-600' : 'font-semibold text-amber-700'}>Worker{job.helpers.length ? 's' : ''}: {job.assignedName ? [job.assignedName, ...job.helpers.map((h) => h.name)].join(', ') : 'Unassigned — available'}</span>}
       </div>
 
       {(job.assignedBy || job.lastMove) && (
@@ -252,8 +257,23 @@ function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onD
           )}
         </select>
       ) : canAssign ? (
-        <div className="mt-1 text-xs text-slate-600">Worker: {job.assignedName ?? 'Unassigned'}</div>
+        <div className="mt-1 text-xs text-slate-600">Worker{job.helpers.length ? 's' : ''}: {[job.assignedName ?? 'Unassigned', ...job.helpers.map((h) => h.name)].join(', ')}</div>
       ) : null}
+      {canAssign && !closed && job.status !== 'COMPLETED' && job.assignedToId && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-1">
+          {job.helpers.map((h) => (
+            <span key={h.id} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-700">
+              {h.name}
+              <button type="button" disabled={busy} aria-label={`Remove ${h.name}`} className="text-slate-400 hover:text-red-600" onClick={() => onHelpers(job.helpers.filter((x) => x.id !== h.id).map((x) => x.id))}>×</button>
+            </span>
+          ))}
+          <select aria-label="Add another worker" value="" disabled={busy} className="input w-auto py-0.5 text-[11px]"
+            onChange={(e) => { if (e.target.value) onHelpers([...job.helpers.map((x) => x.id), Number(e.target.value)]); }}>
+            <option value="">+ add worker…</option>
+            {workers.filter((w) => w.id !== job.assignedToId && !job.helpers.some((h) => h.id === w.id)).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
+        </div>
+      )}
 
       {claimable && !closed && (
         <button type="button" disabled={busy} onClick={onTake} className="btn-primary btn-sm mt-2 w-full">✋ Take this job</button>

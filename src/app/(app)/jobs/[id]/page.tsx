@@ -8,8 +8,9 @@ import { FILE_SOURCE, JOB_COLUMNS, JOB_STATUS } from '@/lib/labels';
 import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { ImageUpload } from '@/components/ImageUpload';
 import { Card, DL, Empty, PageHeader, StatusBadge } from '@/components/ui';
-import { addProgress, assignWorkerForm, cancelJob, setJobStatus, takeJobForm } from '../actions';
+import { addProgress, assignWorkerForm, setHelpersForm, cancelJob, setJobStatus, takeJobForm } from '../actions';
 import { groupSpecs } from '@/lib/pricing';
+import { jobTitle, printJobInfo } from '@/lib/printJob';
 
 export default async function JobPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requireUser(['jobs_manage', 'jobs_own']);
@@ -20,10 +21,11 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
 
   const job = await prisma.job.findFirst({
     // Workers can open their own jobs, and unassigned pending ones they may take.
-    where: { id: jobId, ...(isStaff ? {} : { OR: [{ assignedToId: user.id }, { assignedToId: null, status: 'PENDING' }] }) },
+    where: { id: jobId, ...(isStaff ? {} : { OR: [{ assignedToId: user.id }, { helpers: { some: { userId: user.id } } }, { assignedToId: null, status: 'PENDING' }] }) },
     include: {
       order: { select: { id: true, orderNo: true, targetDate: true, customer: { select: { name: true, mobile: true } } } },
       assignedTo: { select: { id: true, name: true } },
+      helpers: { select: { user: { select: { id: true, name: true } } } },
       assignedBy: { select: { name: true } },
       orderItem: {
         select: {
@@ -52,7 +54,7 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
   return (
     <div className="space-y-4">
       <PageHeader
-        title={`${job.order.orderNo} · ${it.description}`}
+        title={`${job.order.orderNo} · ${jobTitle(job.kind, it)}`}
         subtitle={
           <span className="flex flex-wrap items-center gap-2">
             <StatusBadge value={job.status} labels={JOB_STATUS} />
@@ -70,12 +72,12 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
               ['Order no.', isStaff ? <Link href={`/orders/${job.order.id}`} className="link">{job.order.orderNo}</Link> : job.order.orderNo],
               ['Customer', job.order.customer.name],
               ['Mobile', job.order.customer.mobile],
-              ['Product', `${it.description} (${it.product.category.name})`],
+              ['Product', job.kind === 'PRINT' ? `${printJobInfo(it).title} — ${printJobInfo(it).detail} (pages of ${it.description})` : `${it.description} (${it.product.category.name})`],
               ['Quantity', String(it.quantity)],
               ['Size', it.widthFt && it.heightFt ? `${it.widthFt} × ${it.heightFt} ft` : null],
               ['File source', fileSource],
               ['Due date', <span key="due" className={overdue ? 'text-red-600' : ''}>{fmtDate(job.dueDate)}</span>],
-              ['Assigned worker', job.assignedTo?.name ?? 'Unassigned'],
+              ['Assigned worker' + (job.helpers.length ? 's' : ''), job.assignedTo ? [job.assignedTo.name, ...job.helpers.map((h) => h.user.name)].join(', ') : 'Unassigned'],
               ['Assigned by', job.assignedBy && job.assignedAt ? `${job.assignedBy.name} · ${fmtDateTime(job.assignedAt)}` : null],
               ['Started by', (() => { const l = job.logs.find((x) => x.toStatus === 'IN_PROCESS'); return l ? `${l.user.name} · ${fmtDateTime(l.createdAt)}` : null; })()],
               ['Last moved by', (() => { const l = job.logs.find((x) => x.toStatus); return l ? `${l.user.name} → ${JOB_STATUS[l.toStatus!]} · ${fmtDateTime(l.createdAt)}` : null; })()],
@@ -143,6 +145,17 @@ export default async function JobPage({ params }: { params: Promise<{ id: string
               </label>
               <SubmitButton>Save</SubmitButton>
             </ActionForm>
+            {job.assignedTo && (
+              <ActionForm action={setHelpersForm.bind(null, job.id)} className="mt-3 border-t border-slate-100 pt-3">
+                <span className="label">Also working on it (tick any)</span>
+                <div className="flex flex-wrap gap-x-4 gap-y-1">
+                  {workers.filter((w) => w.id !== job.assignedToId).map((w) => (
+                    <label key={w.id} className="flex items-center gap-1.5 text-sm"><input type="checkbox" name="helperId" value={w.id} defaultChecked={job.helpers.some((h) => h.user.id === w.id)} />{w.name}</label>
+                  ))}
+                </div>
+                <SubmitButton className="btn-secondary mt-2">Save workers</SubmitButton>
+              </ActionForm>
+            )}
           </Card>
         )}
 

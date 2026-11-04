@@ -50,6 +50,8 @@ enum PaymentMethod {
   MAYA
   BANK_TRANSFER
   OTHER
+  /// Order payment drawn from money the customer gave in advance (see CustomerDeposit).
+  ADVANCE
 }
 
 enum FileSource {
@@ -77,6 +79,12 @@ enum JobStatus {
   QUALITY_CHECK
   COMPLETED
   CANCELLED
+}
+
+/// MAIN = the product itself (album binding, frame…); PRINT = the matching Lay Flat Print job (pages printed per size and leaves).
+enum JobKind {
+  MAIN
+  PRINT
 }
 
 enum MaterialLevel {
@@ -147,6 +155,9 @@ model User {
   incidentsLogged   Incident[]           @relation("IncidentCreatedBy")
   paymentsReceived  Payment[]            @relation("PaymentReceivedBy")
   paymentsVoided    Payment[]            @relation("PaymentVoidedBy")
+  depositsReceived  CustomerDeposit[]    @relation("DepositReceivedBy")
+  combinedReceived  CombinedPayment[]    @relation("CombinedPaymentReceivedBy")
+  depositsVoided    CustomerDeposit[]    @relation("DepositVoidedBy")
   voidsApproved     Payment[]            @relation("PaymentVoidApprovedBy")
   jobsAssigned      Job[]                @relation("JobAssignedTo")
   jobsDelegated     Job[]                @relation("JobAssignedBy")
@@ -163,6 +174,7 @@ model User {
   /// Access role (permissions). The `role` enum is kept only for ADMIN vs non-admin in older data.
   accessRole        AccessRole?          @relation(fields: [accessRoleId], references: [id])
   accessRoleId      Int?
+  jobHelping        JobHelper[]
 
   @@map("users")
 }
@@ -223,7 +235,7 @@ model Attachment {
 // ───────────────────────── Customers & suppliers ─────────────────────────
 
 model Customer {
-  id                 Int             @id @default(autoincrement())
+  id                 Int               @id @default(autoincrement())
   name               String
   mobile             String?
   facebook           String? // Facebook name or profile link
@@ -231,19 +243,23 @@ model Customer {
   address            String?
   notes              String?
   /// The shop's own branch: orders are stock transfers — no prices, no payments, excluded from sales figures.
-  isInternal         Boolean         @default(false)
+  isInternal         Boolean           @default(false)
   /// Owner/admin hid this customer's balance (receivable) from non-admin logins.
-  balanceHidden      Boolean         @default(false)
+  balanceHidden      Boolean           @default(false)
   /// Owner/admin-approved special discount for this customer, in percent (e.g. 10 = 10% off every order). Applied without the approval PIN.
   specialDiscountPct Float?
   /// Loyalty points balance (sum of points_entries) and pesos paid that did not yet make a full earning step (centavos).
-  points             Int             @default(0)
-  pointsCarry        Int             @default(0)
+  points             Int               @default(0)
+  pointsCarry        Int               @default(0)
   pointsEntries      PointsEntry[]
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
   orders             Order[]
   payments           Payment[]
+  deposits           CustomerDeposit[]
+  /// Combined balance: the customer's unpaid orders are shown and paid as one total (payments split oldest order first).
+  combineBalances    Boolean           @default(false)
+  combinedPayments   CombinedPayment[]
   specialPrices      CustomerPrice[]
 
   @@index([name])
@@ -292,6 +308,8 @@ model Product {
   /// Centavos. FIXED: price per piece. PER_SQFT: price per square foot.
   basePrice   Int              @default(0)
   unit        String           @default("pc")
+  /// Lay Flat albums: every order line also creates a separate PRINT job (its pages, by size and leaves).
+  printJob    Boolean          @default(false)
   active      Boolean          @default(true)
   createdAt   DateTime         @default(now())
   updatedAt   DateTime         @updatedAt
@@ -324,16 +342,17 @@ model ProductOption {
 }
 
 model ProductOptionValue {
-  id         Int              @id @default(autoincrement())
-  optionId   Int
-  option     ProductOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
-  label      String
+  id             Int              @id @default(autoincrement())
+  optionId       Int
+  option         ProductOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  label          String
   /// Centavos added to the unit price when chosen (can be negative).
-  priceDelta Int              @default(0)
-  sortOrder  Int              @default(0)
-  active     Boolean          @default(true)
-  bomLines   BillOfMaterial[] @relation("BomCondition")
-  bomLines2  BillOfMaterial[] @relation("BomCondition2")
+  priceDelta     Int              @default(0)
+  sortOrder      Int              @default(0)
+  active         Boolean          @default(true)
+  bomLines       BillOfMaterial[] @relation("BomCondition")
+  bomLines2      BillOfMaterial[] @relation("BomCondition2")
+  customerPrices CustomerPrice[]
 
   @@map("product_option_values")
 }
@@ -424,8 +443,11 @@ model OrderItem {
   specsNotes          String? // free-text specifications
   fileSource          FileSource      @default(NONE)
   fileSourceNote      String?
+  /// Set when the item was voided with its payment: taken off the order total, jobs cancelled, kept for history.
+  voidedAt            DateTime?
+  voidReason          String?
   specs               OrderItemSpec[]
-  job                 Job?
+  jobs                Job[]
 
   @@map("order_items")
 }
@@ -446,35 +468,84 @@ model OrderItemSpec {
 }
 
 model Payment {
-  id               Int             @id @default(autoincrement())
-  receiptNo        String          @unique // AR-2026-00045
-  orderId          Int
-  order            Order           @relation(fields: [orderId], references: [id])
-  customerId       Int
-  customer         Customer        @relation(fields: [customerId], references: [id])
-  amount           Int
-  method           PaymentMethod
-  reference        String? // GCash ref no., bank ref, etc.
+  id                Int              @id @default(autoincrement())
+  receiptNo         String           @unique // AR-2026-00045
+  orderId           Int
+  order             Order            @relation(fields: [orderId], references: [id])
+  customerId        Int
+  customer          Customer         @relation(fields: [customerId], references: [id])
+  amount            Int
+  method            PaymentMethod
+  reference         String? // GCash ref no., bank ref, etc.
   /// The shop's GCash / Maya / bank account that received the money (null for cash).
-  accountId        Int?
-  account          PaymentAccount? @relation(fields: [accountId], references: [id])
-  notes            String?
-  paidAt           DateTime        @default(now())
-  voided           Boolean         @default(false)
-  voidReason       String?
-  voidedAt         DateTime?
-  voidedById       Int?
-  voidedBy         User?           @relation("PaymentVoidedBy", fields: [voidedById], references: [id])
+  accountId         Int?
+  account           PaymentAccount?  @relation(fields: [accountId], references: [id])
+  notes             String?
+  paidAt            DateTime         @default(now())
+  voided            Boolean          @default(false)
+  voidReason        String?
+  voidedAt          DateTime?
+  voidedById        Int?
+  voidedBy          User?            @relation("PaymentVoidedBy", fields: [voidedById], references: [id])
   /// Owner/admin whose approval PIN authorised the void.
-  voidApprovedById Int?
-  voidApprovedBy   User?           @relation("PaymentVoidApprovedBy", fields: [voidApprovedById], references: [id])
-  receivedById     Int
-  receivedBy       User            @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
-  createdAt        DateTime        @default(now())
+  voidApprovedById  Int?
+  voidApprovedBy    User?            @relation("PaymentVoidApprovedBy", fields: [voidApprovedById], references: [id])
+  receivedById      Int
+  receivedBy        User             @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  createdAt         DateTime         @default(now())
+  /// For method ADVANCE: which advance payment(s) this was drawn from.
+  depositUses       DepositUse[]
+  /// Share of a combined payment (one receipt for several orders of the same customer).
+  combinedPaymentId Int?
+  combinedPayment   CombinedPayment? @relation(fields: [combinedPaymentId], references: [id])
 
   @@index([orderId])
+  @@index([combinedPaymentId])
   @@index([paidAt])
   @@map("payments")
+}
+
+/// Advance payment: money a customer gives before there is an order. It gets its own AR receipt and is
+/// used later as the "Advance payment" method on orders (drawn oldest first).
+model CustomerDeposit {
+  id           Int             @id @default(autoincrement())
+  receiptNo    String          @unique
+  customerId   Int
+  customer     Customer        @relation(fields: [customerId], references: [id])
+  amount       Int
+  method       PaymentMethod
+  reference    String?
+  accountId    Int?
+  account      PaymentAccount? @relation(fields: [accountId], references: [id])
+  notes        String?
+  receivedAt   DateTime        @default(now())
+  receivedById Int
+  receivedBy   User            @relation("DepositReceivedBy", fields: [receivedById], references: [id])
+  voided       Boolean         @default(false)
+  voidReason   String?
+  voidedAt     DateTime?
+  voidedById   Int?
+  voidedBy     User?           @relation("DepositVoidedBy", fields: [voidedById], references: [id])
+  uses         DepositUse[]
+  createdAt    DateTime        @default(now())
+
+  @@index([customerId])
+  @@index([receivedAt])
+  @@map("customer_deposits")
+}
+
+/// Part of an advance payment applied to one order payment.
+model DepositUse {
+  id        Int             @id @default(autoincrement())
+  depositId Int
+  deposit   CustomerDeposit @relation(fields: [depositId], references: [id])
+  paymentId Int
+  payment   Payment         @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  amount    Int
+
+  @@index([depositId])
+  @@index([paymentId])
+  @@map("deposit_uses")
 }
 
 // ───────────────────────── Production ─────────────────────────
@@ -483,8 +554,10 @@ model Job {
   id                Int             @id @default(autoincrement())
   orderId           Int
   order             Order           @relation(fields: [orderId], references: [id])
-  orderItemId       Int             @unique
+  orderItemId       Int
   orderItem         OrderItem       @relation(fields: [orderItemId], references: [id])
+  /// One MAIN job per line; Lay Flat albums also get a PRINT job (the pages) on the Photo Printing board.
+  kind              JobKind         @default(MAIN)
   status            JobStatus       @default(PENDING)
   assignedToId      Int?
   assignedTo        User?           @relation("JobAssignedTo", fields: [assignedToId], references: [id])
@@ -501,7 +574,10 @@ model Job {
   logs              JobStatusLog[]
   attachments       Attachment[]
   stockMovements    StockMovement[]
+  /// Extra workers on this job (the lead is assignedTo).
+  helpers           JobHelper[]
 
+  @@unique([orderItemId, kind])
   @@index([status])
   @@index([assignedToId])
   @@map("jobs")
@@ -1055,15 +1131,17 @@ model Incident {
 /// The shop's receiving accounts (e.g. "Jc's GCash 0917…", "BDO Savings …1234").
 /// Payments by GCash / Maya / bank transfer record which account the customer sent the money to.
 model PaymentAccount {
-  id            Int           @id @default(autoincrement())
-  method        PaymentMethod // GCASH, MAYA, BANK_TRANSFER or OTHER
-  label         String // short name shown at the counter, e.g. "Jc's GCash"
-  accountName   String? // name on the account
-  accountNumber String? // mobile no. / account no.
-  active        Boolean       @default(true)
-  sortOrder     Int           @default(0)
-  createdAt     DateTime      @default(now())
-  payments      Payment[]
+  id               Int               @id @default(autoincrement())
+  method           PaymentMethod // GCASH, MAYA, BANK_TRANSFER or OTHER
+  label            String // short name shown at the counter, e.g. "Jc's GCash"
+  accountName      String? // name on the account
+  accountNumber    String? // mobile no. / account no.
+  active           Boolean           @default(true)
+  sortOrder        Int               @default(0)
+  createdAt        DateTime          @default(now())
+  payments         Payment[]
+  combinedPayments CombinedPayment[]
+  deposits         CustomerDeposit[]
 
   @@map("payment_accounts")
 }
@@ -1086,18 +1164,21 @@ model AccessRole {
 
 /// Owner/admin-set special discount for one customer on one product: this amount is deducted from each item's normal price.
 model CustomerPrice {
-  id          Int      @id @default(autoincrement())
-  customerId  Int
-  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  productId   Int
-  product     Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  id            Int                 @id @default(autoincrement())
+  customerId    Int
+  customer      Customer            @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  productId     Int
+  product       Product             @relation(fields: [productId], references: [id], onDelete: Cascade)
   /// Centavos taken off the normal unit price of each item (e.g. 300 = ₱3 off each).
-  amountOff   Int
-  createdById Int?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  amountOff     Int
+  /// Only when this option value (e.g. "Leaves: 15") is chosen on the line; null = any.
+  optionValueId Int?
+  optionValue   ProductOptionValue? @relation(fields: [optionValueId], references: [id], onDelete: Cascade)
+  createdById   Int?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
 
-  @@unique([customerId, productId])
+  @@unique([customerId, productId, optionValueId])
   @@map("customer_prices")
 }
 
@@ -1118,4 +1199,45 @@ model PointsEntry {
   @@index([paymentId])
   @@index([orderId])
   @@map("points_entries")
+}
+
+/// Additional worker on a job (besides the lead in Job.assignedTo) — e.g. two people on a frame.
+model JobHelper {
+  jobId     Int
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id])
+  addedById Int?
+  addedAt   DateTime @default(now())
+
+  @@id([jobId, userId])
+  @@index([userId])
+  @@map("job_helpers")
+}
+
+/// One payment toward a customer's combined balance: a single acknowledgement receipt whose money is split over
+/// the customer's unpaid orders (oldest first). Each share is an ordinary Payment on its order (receipt AR-…-1, -2…),
+/// so order balances, reports and voids work as usual; order items and totals are never changed.
+model CombinedPayment {
+  id            Int             @id @default(autoincrement())
+  receiptNo     String          @unique
+  customerId    Int
+  customer      Customer        @relation(fields: [customerId], references: [id])
+  amount        Int
+  method        PaymentMethod
+  reference     String?
+  accountId     Int?
+  account       PaymentAccount? @relation(fields: [accountId], references: [id])
+  notes         String?
+  paidAt        DateTime        @default(now())
+  receivedById  Int
+  receivedBy    User            @relation("CombinedPaymentReceivedBy", fields: [receivedById], references: [id])
+  /// Combined balance of the customer just before this payment (for the receipt).
+  balanceBefore Int
+  payments      Payment[]
+  createdAt     DateTime        @default(now())
+
+  @@index([customerId])
+  @@index([paidAt])
+  @@map("combined_payments")
 }

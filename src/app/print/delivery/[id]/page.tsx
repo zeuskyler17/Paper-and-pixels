@@ -26,6 +26,7 @@ export default async function DeliverySlipPage({ params }: { params: Promise<{ i
             orderNo: true, balance: true, status: true,
             customer: { select: { name: true, mobile: true } },
             items: {
+              where: { voidedAt: null },
               orderBy: { id: 'asc' },
               select: { id: true, description: true, quantity: true, widthFt: true, heightFt: true, specs: { select: { name: true, value: true }, orderBy: { id: 'asc' } } },
             },

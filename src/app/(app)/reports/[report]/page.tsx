@@ -45,13 +45,19 @@ export default async function ReportPage({ params, searchParams }: { params: Par
 
   return (
     <div className="space-y-4">
+      {/* The Daily report prints on A4 (long bond / coupon) so one day fits on one or two full pages; other reports keep the half-letter size. */}
       <style>{`
-        @page { size: 8.5in 5.5in; margin: 8mm; }
+        @page { size: ${report === 'daily' ? 'A4 portrait' : '8.5in 5.5in'}; margin: ${report === 'daily' ? '10mm 12mm' : '8mm'}; }
         @media print {
-          main { margin-left: 0 !important; padding: 0 !important; }
-          .card { box-shadow: none !important; border: none !important; }
-          .table { font-size: 8.5px; }
-          .table th, .table td { padding: 2px 4px; }
+          main { margin-left: 0 !important; padding: 0 !important; max-width: none !important; }
+          .card { box-shadow: none !important; border: none !important; break-inside: avoid; page-break-inside: avoid; }
+          .table { font-size: 8.5px; width: 100%; }
+          .table th, .table td { padding: 2px 4px; line-height: 1.25; }
+          h1 { font-size: 18px !important; } h2, .card h2 { font-size: 10px !important; }
+          .card > div:first-child { min-height: 0 !important; padding-top: 4px !important; padding-bottom: 4px !important; }
+          .space-y-4 > * + * { margin-top: 6px !important; }
+          .table thead { display: table-header-group; }
+          .table tr { break-inside: avoid; page-break-inside: avoid; }
           a { color: inherit !important; text-decoration: none !important; }
         }
       `}</style>

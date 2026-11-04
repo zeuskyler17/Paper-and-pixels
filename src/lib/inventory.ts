@@ -55,7 +55,7 @@ export async function moveStock(tx: Tx, m: MoveInput) {
  */
 export async function deductBomForJob(tx: Tx, jobId: number, userId: number) {
   const job = await tx.job.findUniqueOrThrow({ where: { id: jobId } });
-  if (job.materialsDeducted) return;
+  if (job.materialsDeducted || job.kind === 'PRINT') return; // the line's BOM belongs to its MAIN job
   await deductBomForOrderItem(tx, job.orderItemId, userId, jobId);
   await tx.job.update({ where: { id: jobId }, data: { materialsDeducted: true } });
 }
@@ -99,7 +99,7 @@ export async function deductBomForOrderItem(tx: Tx, orderItemId: number, userId:
  * matching `where` gets an equal positive ADJUSTMENT (same job, current unit cost) and is marked returnedAt.
  * Returns the number of material lines returned.
  */
-async function returnDeductions(tx: Tx, where: { jobId: number } | { jobId: null; notes: { startsWith: string } }, userId: number, reason: string) {
+export async function returnDeductions(tx: Tx, where: { jobId: number } | { jobId: null; notes: { startsWith: string } }, userId: number, reason: string) {
   const moves = await tx.stockMovement.findMany({ where: { ...where, type: 'JOB_DEDUCT', returnedAt: null }, orderBy: { id: 'asc' } });
   const now = new Date();
   for (const m of moves) {

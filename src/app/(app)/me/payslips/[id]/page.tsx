@@ -48,7 +48,7 @@ export default async function MyPayslipPage({ params }: { params: Promise<{ id: 
         <PrintButton label="Print payslip" />
       </div>
 
-      <div className="slip card mx-auto max-w-2xl p-6 text-[13px] text-black">
+      <div className="slip card theme-light mx-auto max-w-2xl p-6 text-[13px] text-black">
         <header className="flex items-start gap-3 border-b-2 border-black pb-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo.png" alt="" width={48} height={48} className="h-12 w-12 shrink-0" />
