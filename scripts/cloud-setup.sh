@@ -12,7 +12,9 @@ set -a; . ./.env.supabase; set +a
 [ -n "${SUPABASE_URL:-}" ] || { echo "Paste the Session pooler connection string into .env.supabase first."; exit 1; }
 case "$SUPABASE_URL" in *YOUR-PASSWORD*) echo "Replace [YOUR-PASSWORD] in .env.supabase with your database password."; exit 1;; esac
 
-# The app talks to Supabase through the session pooler so each branch keeps its own schema (raw SQL relies on search_path).
+# Setup (db/copy) uses the session pooler (port 5432). The online app uses the transaction pooler (port 6543,
+# pgbouncer=true): the session pooler allows only 15 clients, which Vercel's many small instances fill at once.
+# Raw SQL names its branch schema explicitly (table() in src/lib/db.ts), so the pooler cannot mix branches.
 url_for() { case "$SUPABASE_URL" in *\?*) sep='&';; *) sep='?';; esac; printf '%s%sschema=%s%s' "$SUPABASE_URL" "$sep" "$1" "${2:-}"; }
 
 case "${1:-}" in
@@ -39,9 +41,10 @@ SQL
     ;;
   env)
     add() { printf '%s' "$2" | npx --yes vercel@latest env add "$1" production --force >/dev/null && echo "set $1"; }
-    add DATABASE_URL "$(url_for public '&connection_limit=3')"
-    add DATABASE_URL_KEONI "$(url_for keoni '&connection_limit=3')"
-    add DATABASE_URL_KY "$(url_for ky '&connection_limit=3')"
+    SUPABASE_URL="$(printf '%s' "$SUPABASE_URL" | sed 's#:5432/#:6543/#')"
+    add DATABASE_URL "$(url_for public '&pgbouncer=true&connection_limit=3')"
+    add DATABASE_URL_KEONI "$(url_for keoni '&pgbouncer=true&connection_limit=3')"
+    add DATABASE_URL_KY "$(url_for ky '&pgbouncer=true&connection_limit=3')"
     add AUTH_SECRET "$(openssl rand -base64 48 | tr -d '\n')"
     ;;
   *) echo "usage: $0 db | env"; exit 1;;

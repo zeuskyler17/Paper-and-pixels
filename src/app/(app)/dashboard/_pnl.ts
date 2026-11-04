@@ -1,5 +1,5 @@
 import 'server-only';
-import { prisma } from '@/lib/db';
+import { prisma, table } from '@/lib/db';
 import { TZ } from '@/lib/dates';
 
 export type PnlMonth = {
@@ -21,17 +21,17 @@ export async function monthlyPnl(months = 12): Promise<PnlMonth[]> {
   const [sales, expenses, materials] = await Promise.all([
     prisma.$queryRaw<Row[]>`
       SELECT date_trunc('month', o."createdAt" AT TIME ZONE ${TZ}) AS m, SUM(o.total) AS v
-      FROM orders o JOIN customers c ON c.id = o."customerId" WHERE o.status <> 'CANCELLED' AND c."isInternal" = false
+      FROM ${table('orders')} o JOIN ${table('customers')} c ON c.id = o."customerId" WHERE o.status <> 'CANCELLED' AND c."isInternal" = false
         AND o."createdAt" >= (date_trunc('month', now() AT TIME ZONE ${TZ}) - make_interval(months => ${count - 1}::int)) AT TIME ZONE ${TZ}
       GROUP BY 1`,
     prisma.$queryRaw<Row[]>`
       SELECT date_trunc('month', "date" AT TIME ZONE ${TZ}) AS m, SUM(amount) AS v
-      FROM expenses WHERE voided = false
+      FROM ${table('expenses')} WHERE voided = false
         AND "date" >= (date_trunc('month', now() AT TIME ZONE ${TZ}) - make_interval(months => ${count - 1}::int)) AT TIME ZONE ${TZ}
       GROUP BY 1`,
     prisma.$queryRaw<Row[]>`
       SELECT date_trunc('month', "createdAt" AT TIME ZONE ${TZ}) AS m, ROUND(SUM(-quantity * "unitCost")) AS v
-      FROM stock_movements WHERE type IN ('JOB_DEDUCT', 'STOCK_OUT') AND "returnedAt" IS NULL
+      FROM ${table('stock_movements')} WHERE type IN ('JOB_DEDUCT', 'STOCK_OUT') AND "returnedAt" IS NULL
         AND "createdAt" >= (date_trunc('month', now() AT TIME ZONE ${TZ}) - make_interval(months => ${count - 1}::int)) AT TIME ZONE ${TZ}
       GROUP BY 1`,
   ]);

@@ -57,6 +57,20 @@ export const prisma: PrismaClient = new Proxy({} as PrismaClient, {
   },
 });
 
+/**
+ * A table of the current branch, schema-qualified, for raw SQL: ${table('orders')} → "keoni"."orders".
+ * Needed where branches share one database (online copy, one schema per branch): through a connection pooler
+ * the search_path is not kept, so an unqualified raw query could hit another branch's table.
+ * Prisma's own queries already carry the schema from ?schema= in the URL.
+ */
+export function table(name: string): Prisma.Sql {
+  const key = currentBranch();
+  if (!key) throw new Error('No branch selected — please sign in again.');
+  const url = process.env[branchByKey(key).envVar] ?? '';
+  const schema = /[?&]schema=([^&]+)/.exec(url)?.[1] ?? 'public';
+  return Prisma.raw(`"${decodeURIComponent(schema).replace(/"/g, '""')}"."${name.replace(/"/g, '""')}"`);
+}
+
 export { BRANCHES };
 
 /** Transaction client type, for helpers that must run inside prisma.$transaction(). */

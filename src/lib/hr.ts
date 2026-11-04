@@ -1,7 +1,7 @@
 import 'server-only';
 import bcrypt from 'bcryptjs';
 import type { DayType, Employee, TimeSource } from '@prisma/client';
-import { prisma, type Tx } from './db';
+import { prisma, table, type Tx } from './db';
 import { getSettings } from './settings';
 import { parseDateInput, toDateInput, todayManila } from './dates';
 import { computeEntry, dayTypeFor, fmtClock, fmtSlot, overbreakMinutes, parseBreakSchedule } from './timekeeping';
@@ -13,8 +13,8 @@ export function employeeName(e: Pick<Employee, 'firstName' | 'lastName' | 'nickn
 /** Next employee number EMP-0001 (not reset yearly). Call inside the creating transaction. */
 export async function nextEmployeeNo(tx: Tx): Promise<string> {
   const rows = await tx.$queryRaw<{ value: number }[]>`
-    INSERT INTO "counters" ("key", "value") VALUES ('EMP', 1)
-    ON CONFLICT ("key") DO UPDATE SET "value" = "counters"."value" + 1
+    INSERT INTO ${table('counters')} AS c ("key", "value") VALUES ('EMP', 1)
+    ON CONFLICT ("key") DO UPDATE SET "value" = c."value" + 1
     RETURNING "value"`;
   return `EMP-${String(rows[0].value).padStart(4, '0')}`;
 }
