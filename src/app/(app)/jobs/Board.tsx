@@ -33,6 +33,8 @@ export type JobCard = {
   lastMove: { to: string; by: string; at: string } | null;
   /** Completed job whose order is not released yet: balance owed and whether all the order's jobs are done. */
   release: { balance: number; ready: boolean } | null;
+  /** When the order was released / delivered (null while not released). */
+  released: string | null;
 };
 
 type Worker = { id: number; name: string };
@@ -53,8 +55,10 @@ const COLUMN_STYLE: Record<string, string> = {
 
 const VIEW_KEY = 'pp_jobs_view';
 
-export function Board({ jobs, workers, canAssign, canRelease = false, showCancelled }: {
+export function Board({ jobs, workers, canAssign, canRelease = false, showCancelled, heading }: {
   jobs: JobCard[]; workers: Worker[]; canAssign: boolean; canRelease?: boolean; showCancelled: boolean;
+  /** Set for the Ready / Released views: one list of finished jobs under this heading instead of the status columns. */
+  heading?: string;
 }) {
   const [view, setView] = useState<'board' | 'list'>('board');
   const [error, setError] = useState<string | null>(null);
@@ -108,7 +112,7 @@ export function Board({ jobs, workers, canAssign, canRelease = false, showCancel
       canAssign={canAssign}
       canRelease={canRelease}
       busy={busyId === job.id}
-      draggable={view === 'board' && job.status !== 'CANCELLED'}
+      draggable={view === 'board' && !heading && job.status !== 'CANCELLED'}
       onDragStart={() => setDragId(job.id)}
       onDragEnd={() => { setDragId(null); setOverCol(null); }}
       onMove={(to) => move(job, to)}
@@ -120,7 +124,7 @@ export function Board({ jobs, workers, canAssign, canRelease = false, showCancel
 
   return (
     <div>
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      {!heading && <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="inline-flex rounded-md border border-slate-300 bg-white p-0.5 text-sm">
           {(['board', 'list'] as const).map((v) => (
             <button
@@ -134,7 +138,7 @@ export function Board({ jobs, workers, canAssign, canRelease = false, showCancel
           ))}
         </div>
         {view === 'board' && <span className="hidden text-xs text-slate-500 md:inline">Drag cards between columns, or use the buttons on each card.</span>}
-      </div>
+      </div>}
 
       {error && (
         <div className="mb-3 flex items-start justify-between gap-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
@@ -143,7 +147,14 @@ export function Board({ jobs, workers, canAssign, canRelease = false, showCancel
         </div>
       )}
 
-      {view === 'board' ? (
+      {heading ? (
+        <section>
+          <h2 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.09em] text-slate-700">{heading} <span className="text-slate-500">({jobs.length})</span></h2>
+          {jobs.length === 0 ? <p className="text-xs text-slate-400">No jobs</p> : (
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">{jobs.map(renderCard)}</div>
+          )}
+        </section>
+      ) : view === 'board' ? (
         <div className="-mx-4 overflow-x-auto px-4 pb-2 sm:mx-0 sm:px-0">
           <div className="grid auto-cols-[minmax(16rem,1fr)] grid-flow-col gap-3">
             {columns.map((col) => {
@@ -204,7 +215,8 @@ function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onD
   const idx = (JOB_COLUMNS as readonly string[]).indexOf(job.status);
   const next = idx >= 0 && idx < JOB_COLUMNS.length - 1 ? JOB_COLUMNS[idx + 1] : null;
   const prev = idx > 0 ? JOB_COLUMNS[idx - 1] : null;
-  const closed = job.status === 'CANCELLED';
+  // Cancelled, or its order already released: nothing left to move.
+  const closed = job.status === 'CANCELLED' || job.released !== null;
   const notes = job.specsNotes && job.specsNotes.length > 90 ? job.specsNotes.slice(0, 90) + '…' : job.specsNotes;
 
   return (
@@ -235,9 +247,10 @@ function JobCardView({ job, workers, canAssign, canRelease, busy, draggable, onD
         {!canAssign && <span className={job.assignedName ? 'text-slate-600' : 'font-semibold text-amber-700'}>Worker{job.helpers.length ? 's' : ''}: {job.assignedName ? [job.assignedName, ...job.helpers.map((h) => h.name)].join(', ') : 'Unassigned — available'}</span>}
       </div>
 
-      {(job.assignedBy || job.lastMove) && (
+      {(job.assignedBy || job.lastMove || job.released) && (
         <div className="mt-2 space-y-0.5 border-t border-dashed border-slate-200 pt-1.5 text-[11px] leading-snug text-slate-500">
           {job.assignedBy && <div><span className="font-semibold text-slate-600">Assigned by</span> {job.assignedBy}</div>}
+          {job.released && <div><span className="font-semibold text-emerald-700">Released</span> {job.released}</div>}
           {job.lastMove && <div><span className="font-semibold text-slate-600">{job.lastMove.to === 'IN_PROCESS' ? 'Started' : job.lastMove.to === 'COMPLETED' ? 'Completed' : job.lastMove.to === 'CANCELLED' ? 'Cancelled' : `Moved to ${JOB_STATUS[job.lastMove.to] ?? job.lastMove.to}`} by</span> {job.lastMove.by} · {job.lastMove.at}</div>}
         </div>
       )}

@@ -11,14 +11,19 @@ import { jobTitle, printJobInfo } from '@/lib/printJob';
 
 export const metadata = { title: 'Production board' };
 
-type SP = Promise<{ q?: string; worker?: string; category?: string; due?: string; cancelled?: string; alldone?: string }>;
+type SP = Promise<{ q?: string; worker?: string; category?: string; due?: string; cancelled?: string; alldone?: string; show?: string }>;
 
 const COMPLETED_DAYS = 14;
+
+/** show=ready: whole order done, waiting for pick-up / delivery. show=released: order already released / delivered. */
+const SHOW_LABEL = { ready: 'Ready for pick-up / delivery', released: 'Released' } as const;
+type Show = keyof typeof SHOW_LABEL;
 
 export default async function JobsPage({ searchParams }: { searchParams: SP }) {
   const user = await requireUser(['jobs_manage', 'jobs_own']);
   const isWorker = !can(user, 'jobs_manage'); // own jobs only
-  const { q = '', worker = '', category = '', due = '', cancelled, alldone } = await searchParams;
+  const { q = '', worker = '', category = '', due = '', cancelled, alldone, show: showParam = '' } = await searchParams;
+  const show: Show | null = showParam === 'ready' || showParam === 'released' ? showParam : null;
 
   const and: Prisma.JobWhereInput[] = [];
   // Workers see their own jobs, plus unassigned pending jobs they can take — enforced in the query.
@@ -44,14 +49,20 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
   if (due === 'today') and.push({ dueDate: { gte: today.start, lt: today.end } });
   if (due === 'week') and.push({ dueDate: { gte: today.start, lt: manilaDayRange(addDays(todayManila(), 6)).end } });
 
-  const doneCutoff = new Date(Date.now() - COMPLETED_DAYS * 86_400_000);
-  const statusOr: Prisma.JobWhereInput[] = [
-    { status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
-    // Completed jobs stay on the board until their order is released / delivered (all completed: everything).
-    alldone ? { status: 'COMPLETED' } : { status: 'COMPLETED', completedAt: { gte: doneCutoff }, order: { status: { not: 'DELIVERED' } } },
-  ];
-  if (cancelled) statusOr.push({ status: 'CANCELLED' });
-  and.push({ OR: statusOr });
+  if (show === 'ready') {
+    and.push({ status: 'COMPLETED', order: { status: { notIn: ['DELIVERED', 'CANCELLED'] }, jobs: { every: { status: { in: ['COMPLETED', 'CANCELLED'] } } } } });
+  } else if (show === 'released') {
+    and.push({ status: 'COMPLETED', order: { status: 'DELIVERED' } });
+  } else {
+    const doneCutoff = new Date(Date.now() - COMPLETED_DAYS * 86_400_000);
+    const statusOr: Prisma.JobWhereInput[] = [
+      { status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
+      // Completed jobs stay on the board until their order is released / delivered (all completed: everything).
+      alldone ? { status: 'COMPLETED' } : { status: 'COMPLETED', completedAt: { gte: doneCutoff }, order: { status: { not: 'DELIVERED' } } },
+    ];
+    if (cancelled) statusOr.push({ status: 'CANCELLED' });
+    and.push({ OR: statusOr });
+  }
 
   const perCategory = prisma.job.findMany({
     where: { AND: and.filter((w) => w !== catClause), status: { in: ['PENDING', 'IN_PROCESS', 'QUALITY_CHECK'] } },
@@ -60,10 +71,12 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
   const [jobs, workers, categories, openJobs] = await Promise.all([
     prisma.job.findMany({
       where: { AND: and },
-      orderBy: [{ dueDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
+      orderBy: show === 'released'
+        ? [{ order: { deliveredAt: { sort: 'desc', nulls: 'last' } } }, { id: 'desc' }]
+        : [{ dueDate: { sort: 'asc', nulls: 'last' } }, { createdAt: 'asc' }],
       take: 600,
       include: {
-        order: { select: { id: true, orderNo: true, status: true, balance: true, customer: { select: { name: true } }, jobs: { select: { status: true } } } },
+        order: { select: { id: true, orderNo: true, status: true, balance: true, deliveredAt: true, customer: { select: { name: true } }, jobs: { select: { status: true } } } },
         assignedTo: { select: { id: true, name: true } },
         helpers: { select: { user: { select: { id: true, name: true } } } },
         assignedBy: { select: { name: true } },
@@ -85,7 +98,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
   const openByCategory = new Map<number, number>();
   for (const j of openJobs) { const cid = j.kind === 'PRINT' && printCategory ? printCategory : j.orderItem.product.categoryId; openByCategory.set(cid, (openByCategory.get(cid) ?? 0) + 1); }
   const current = categories.find((c) => c.id === Number(category)) ?? null;
-  const tabHref = (cat: string) => { const p = new URLSearchParams(); if (cat) p.set('category', cat); if (q) p.set('q', q); if (worker) p.set('worker', worker); if (due) p.set('due', due); if (alldone) p.set('alldone', '1'); if (cancelled) p.set('cancelled', '1'); const s = p.toString(); return s ? `/jobs?${s}` : '/jobs'; };
+  const tabHref = (cat: string) => { const p = new URLSearchParams(); if (cat) p.set('category', cat); if (q) p.set('q', q); if (worker) p.set('worker', worker); if (due) p.set('due', due); if (alldone) p.set('alldone', '1'); if (cancelled) p.set('cancelled', '1'); if (show) p.set('show', show); const s = p.toString(); return s ? `/jobs?${s}` : '/jobs'; };
 
   const cards: JobCard[] = jobs.map((j) => {
     const it = j.orderItem;
@@ -115,6 +128,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
       release: j.status === 'COMPLETED' && j.order.status !== 'DELIVERED' && j.order.status !== 'CANCELLED'
         ? { balance: j.order.balance, ready: j.order.jobs.every((x) => x.status === 'COMPLETED' || x.status === 'CANCELLED') }
         : null,
+      released: j.order.status === 'DELIVERED' ? (j.order.deliveredAt ? fmtDateTime(j.order.deliveredAt) : 'yes') : null,
     };
   });
 
@@ -125,7 +139,7 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
     <div>
       <PageHeader
         title={current ? `${current.name} board${isWorker ? ' — my jobs' : ''}` : isWorker ? 'My jobs' : 'Production board'}
-        subtitle={`${active} active job${active === 1 ? '' : 's'}${overdue ? ` · ${overdue} overdue` : ''}${isWorker && cards.some((c) => c.assignedToId === null) ? ` · ${cards.filter((c) => c.assignedToId === null).length} unassigned — press “Take this job” to claim one` : ''} · completed column shows ${alldone ? 'all' : `the last ${COMPLETED_DAYS} days`}`}
+        subtitle={show ? `${SHOW_LABEL[show]}: ${cards.length}${cards.length === 600 ? '+' : ''} item${cards.length === 1 ? '' : 's'}${show === 'released' ? ' · newest first' : ''}` : `${active} active job${active === 1 ? '' : 's'}${overdue ? ` · ${overdue} overdue` : ''}${isWorker && cards.some((c) => c.assignedToId === null) ? ` · ${cards.filter((c) => c.assignedToId === null).length} unassigned — press “Take this job” to claim one` : ''} · completed column shows ${alldone ? 'all' : `the last ${COMPLETED_DAYS} days`}`}
       />
       <div className="mb-3 flex flex-wrap gap-1 border-b border-slate-200 pb-3">
         {[{ id: 0, name: 'All boards' }, ...categories].map((c) => {
@@ -151,17 +165,22 @@ export default async function JobsPage({ searchParams }: { searchParams: SP }) {
               {workers.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
             </select>
           )}
+          <select name="show" defaultValue={show ?? ''} className="input w-auto" aria-label="Show">
+            <option value="">In production</option>
+            <option value="ready">{SHOW_LABEL.ready}</option>
+            <option value="released">{SHOW_LABEL.released}</option>
+          </select>
           <select name="due" defaultValue={due} className="input w-auto">
             <option value="">Any due date</option>
             <option value="overdue">Overdue</option>
             <option value="today">Due today</option>
             <option value="week">Due this week</option>
           </select>
-          <label className="flex items-center gap-1 text-sm"><input type="checkbox" name="alldone" value="1" defaultChecked={!!alldone} /> All completed</label>
-          <label className="flex items-center gap-1 text-sm"><input type="checkbox" name="cancelled" value="1" defaultChecked={!!cancelled} /> Show cancelled</label>
+          {!show && <label className="flex items-center gap-1 text-sm"><input type="checkbox" name="alldone" value="1" defaultChecked={!!alldone} /> All completed</label>}
+          {!show && <label className="flex items-center gap-1 text-sm"><input type="checkbox" name="cancelled" value="1" defaultChecked={!!cancelled} /> Show cancelled</label>}
         </FilterBar>
       </Card>
-      <Board jobs={cards} workers={workers} canAssign={!isWorker} canRelease={can(user, 'orders')} showCancelled={!!cancelled} />
+      <Board jobs={cards} workers={workers} canAssign={!isWorker} canRelease={can(user, 'orders')} showCancelled={!show && !!cancelled} heading={show ? SHOW_LABEL[show] : undefined} />
     </div>
   );
 }

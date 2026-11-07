@@ -41,6 +41,20 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
     select: { id: true, method: true, label: true, accountNumber: true },
   });
 
+  // Earlier method / account / reference of each receipt (from the audit log of "Edit").
+  type Side = { method?: string; accountId?: number | null; reference?: string | null };
+  const editLogs = order.payments.length ? await prisma.auditLog.findMany({
+    where: { entity: 'Payment', action: 'UPDATE', entityId: { in: order.payments.map((p) => String(p.id)) } },
+    orderBy: { createdAt: 'asc' }, select: { id: true, entityId: true, createdAt: true, data: true, user: { select: { name: true } } },
+  }) : [];
+  const edits = editLogs.flatMap((l) => {
+    const d = l.data as { before?: Side; after?: Side } | null;
+    return d?.before && d.after ? [{ id: l.id, paymentId: Number(l.entityId), at: l.createdAt, by: l.user?.name ?? '—', before: d.before, after: d.after }] : [];
+  });
+  const editAccountIds = [...new Set(edits.flatMap((e) => [e.before.accountId, e.after.accountId]).filter((x): x is number => !!x))];
+  const editAccounts = new Map((editAccountIds.length ? await prisma.paymentAccount.findMany({ where: { id: { in: editAccountIds } } }) : []).map((a) => [a.id, a]));
+  const sideText = (x: Side) => `${PAYMENT_METHOD[x.method as keyof typeof PAYMENT_METHOD] ?? x.method ?? '—'}${x.accountId && editAccounts.get(x.accountId) ? ` (${accountLabel(editAccounts.get(x.accountId))})` : ''}${x.reference ? ` · ref ${x.reference}` : ''}`;
+
   const advance = order.customer.isInternal ? 0 : await advanceBalance(prisma, order.customerId);
   // Combined balance: all of this customer's unpaid orders as one total (shown when the option is on).
   const combined = order.customer.combineBalances && !order.customer.isInternal && !(order.customer.balanceHidden && !user.isAdmin)
@@ -197,7 +211,16 @@ export default async function OrderPage({ params }: { params: Promise<{ id: stri
                   <tr key={p.id}>
                     <td className={p.voided ? 'text-slate-400 line-through' : ''}>{p.receiptNo}</td>
                     <td className={`whitespace-nowrap ${p.voided ? 'text-slate-400 line-through' : ''}`}>{fmtDateTime(p.paidAt)}</td>
-                    <td className={p.voided ? 'text-slate-400 line-through' : ''}>{PAYMENT_METHOD[p.method]}{p.reference ? ` · ${p.reference}` : ''}{p.account && <div className="text-[11.5px] text-slate-500">to {accountLabel(p.account)}</div>}{p.depositUses.length > 0 && <div className="text-[11.5px] text-slate-500">from {p.depositUses.map((u, i) => <span key={u.id}>{i > 0 && ', '}<Link href={`/print/advance/${u.deposit.id}`} className="link">{u.deposit.receiptNo}</Link> ({peso(u.amount)})</span>)}</div>}{p.notes && <div className="text-[11.5px] italic text-slate-600">{p.notes}</div>}{p.combinedPayment && <div className="text-[11.5px] text-slate-500">share of combined payment <Link href={`/print/combined/${p.combinedPayment.id}`} className="link">{p.combinedPayment.receiptNo}</Link> ({peso(p.combinedPayment.amount)})</div>}</td>
+                    <td className={p.voided ? 'text-slate-400 line-through' : ''}>{PAYMENT_METHOD[p.method]}{p.reference ? ` · ${p.reference}` : ''}{p.account && <div className="text-[11.5px] text-slate-500">to {accountLabel(p.account)}</div>}{p.depositUses.length > 0 && <div className="text-[11.5px] text-slate-500">from {p.depositUses.map((u, i) => <span key={u.id}>{i > 0 && ', '}<Link href={`/print/advance/${u.deposit.id}`} className="link">{u.deposit.receiptNo}</Link> ({peso(u.amount)})</span>)}</div>}{p.notes && <div className="text-[11.5px] italic text-slate-600">{p.notes}</div>}{edits.some((e) => e.paymentId === p.id) && (
+                      <details className="mt-0.5 min-w-[11rem] text-[11.5px] text-slate-500">
+                        <summary className="cursor-pointer font-medium text-brand-700">History ({edits.filter((e) => e.paymentId === p.id).length} edit{edits.filter((e) => e.paymentId === p.id).length === 1 ? '' : 's'})</summary>
+                        <ol className="mt-1 space-y-1 border-l border-slate-200 pl-2">
+                          {edits.filter((e) => e.paymentId === p.id).map((e) => (
+                            <li key={e.id}><span className="text-slate-700">{sideText(e.before)}</span> → <span className="text-slate-700">{sideText(e.after)}</span><div>{fmtDateTime(e.at)} · {e.by}</div></li>
+                          ))}
+                        </ol>
+                      </details>
+                    )}{p.combinedPayment && <div className="text-[11.5px] text-slate-500">share of combined payment <Link href={`/print/combined/${p.combinedPayment.id}`} className="link">{p.combinedPayment.receiptNo}</Link> ({peso(p.combinedPayment.amount)})</div>}</td>
                     <td>{p.receivedBy.name}</td>
                     <td className={`text-right whitespace-nowrap ${p.voided ? 'text-slate-400 line-through' : 'font-medium'}`}>{peso(p.amount)}</td>
                     <td className="min-w-[10rem] text-right">

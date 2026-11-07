@@ -158,6 +158,8 @@ model User {
   depositsReceived  CustomerDeposit[]    @relation("DepositReceivedBy")
   combinedReceived  CombinedPayment[]    @relation("CombinedPaymentReceivedBy")
   depositsVoided    CustomerDeposit[]    @relation("DepositVoidedBy")
+  paymentVoidsSeen  Payment[]            @relation("PaymentVoidSeenBy")
+  depositVoidsSeen  CustomerDeposit[]    @relation("DepositVoidSeenBy")
   voidsApproved     Payment[]            @relation("PaymentVoidApprovedBy")
   jobsAssigned      Job[]                @relation("JobAssignedTo")
   jobsDelegated     Job[]                @relation("JobAssignedBy")
@@ -490,6 +492,10 @@ model Payment {
   /// Owner/admin whose approval PIN authorised the void.
   voidApprovedById  Int?
   voidApprovedBy    User?            @relation("PaymentVoidApprovedBy", fields: [voidApprovedById], references: [id])
+  /// Owner marked this cancelled receipt as seen (dashboard alert).
+  voidSeenAt        DateTime?
+  voidSeenById      Int?
+  voidSeenBy        User?            @relation("PaymentVoidSeenBy", fields: [voidSeenById], references: [id])
   receivedById      Int
   receivedBy        User             @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
   createdAt         DateTime         @default(now())
@@ -526,6 +532,10 @@ model CustomerDeposit {
   voidedAt     DateTime?
   voidedById   Int?
   voidedBy     User?           @relation("DepositVoidedBy", fields: [voidedById], references: [id])
+  /// Owner marked this cancelled receipt as seen (dashboard alert).
+  voidSeenAt   DateTime?
+  voidSeenById Int?
+  voidSeenBy   User?           @relation("DepositVoidSeenBy", fields: [voidSeenById], references: [id])
   uses         DepositUse[]
   createdAt    DateTime        @default(now())
 

@@ -566,3 +566,39 @@ export async function cancelOrder(orderId: number, _prev: ActionState, fd: FormD
     };
   });
 }
+
+// ───────── cancelled receipts (owner alert) ─────────
+
+/** Owner/admin: mark one cancelled receipt (order payment or advance payment) as seen — it leaves the dashboard alert. */
+export async function markVoidSeen(kind: 'payment' | 'deposit', id: number, _prev: ActionState, _fd: FormData): Promise<ActionState> {
+  return attempt(async () => {
+    const user = await assertUser('admin');
+    const data = { voidSeenAt: new Date(), voidSeenById: user.id };
+    await prisma.$transaction(async (tx) => {
+      const r = kind === 'payment'
+        ? await tx.payment.update({ where: { id, voided: true }, data, select: { receiptNo: true } })
+        : await tx.customerDeposit.update({ where: { id, voided: true }, data, select: { receiptNo: true } });
+      await audit(tx, user.id, 'UPDATE', kind === 'payment' ? 'Payment' : 'Deposit', id, `Marked cancelled receipt ${r.receiptNo} as seen`);
+    });
+    revalidatePath('/dashboard');
+    revalidatePath('/orders/cancelled-receipts');
+    return { ok: 'Marked as seen.' };
+  });
+}
+
+/** Owner/admin: mark every cancelled receipt not yet seen as seen. */
+export async function markAllVoidsSeen(_prev: ActionState, _fd: FormData): Promise<ActionState> {
+  return attempt(async () => {
+    const user = await assertUser('admin');
+    const data = { voidSeenAt: new Date(), voidSeenById: user.id };
+    const where = { voided: true, voidSeenAt: null };
+    const n = await prisma.$transaction(async (tx) => {
+      const [p, d] = [await tx.payment.updateMany({ where, data }), await tx.customerDeposit.updateMany({ where, data })];
+      if (p.count + d.count) await audit(tx, user.id, 'UPDATE', 'Payment', 'all', `Marked ${p.count + d.count} cancelled receipt${p.count + d.count === 1 ? '' : 's'} as seen`);
+      return p.count + d.count;
+    });
+    revalidatePath('/dashboard');
+    revalidatePath('/orders/cancelled-receipts');
+    return { ok: n ? `${n} marked as seen.` : 'Nothing new to mark.' };
+  });
+}

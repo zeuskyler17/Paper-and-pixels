@@ -50,7 +50,7 @@ export default async function OrdersPage({ searchParams }: { searchParams: SP })
       <PageHeader
         title="Orders"
         subtitle={`${orders.length}${orders.length === 300 ? '+' : ''} orders · ${peso(totals.total)} billed · ${peso(totals.balance)} unpaid`}
-        actions={<Link href="/orders/new" className="btn-primary">+ New order</Link>}
+        actions={<><Link href="/orders/cancelled-receipts" className="btn-secondary">Cancelled receipts</Link><Link href="/orders/new" className="btn-primary">+ New order</Link></>}
       />
       <Card>
         <FilterBar>

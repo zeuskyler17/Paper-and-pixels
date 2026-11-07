@@ -14,6 +14,9 @@ import { monthlyPnl } from './_pnl';
 import { PnlChart } from './PnlChart';
 import { punchFlags } from '@/lib/clockFlags';
 import { fmtRolls, isRoll } from '@/lib/rolls';
+import { voidedReceipts } from '@/lib/voidedReceipts';
+import { ActionForm, SubmitButton } from '@/components/ActionForm';
+import { markAllVoidsSeen, markVoidSeen } from '../orders/actions';
 
 export const metadata = { title: 'Dashboard' };
 export const dynamic = 'force-dynamic';
@@ -54,6 +57,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
     const f = await punchFlags(entries);
     return entries.filter((e) => f.has(e.id) && !f.get(e.id)!.cleared).map((e) => ({ id: e.id, name: `${e.employee.firstName} ${e.employee.lastName}`, reasons: [...(f.get(e.id)!.in.map((r) => `In: ${r}`)), ...(f.get(e.id)!.out.map((r) => `Out: ${r}`))] }));
   })() : [];
+  // Cancelled receipts the owner has not marked as seen yet.
+  const newVoids = can(user, 'admin') ? await voidedReceipts({ unseen: true, take: 50 }) : [];
   const today = manilaDayRange();
   const monthStart = manilaDayRange(startOfMonthManila()).start;
   const openJob = { status: { notIn: ['COMPLETED', 'CANCELLED'] as ('COMPLETED' | 'CANCELLED')[] } };
@@ -173,6 +178,35 @@ export default async function DashboardPage({ searchParams }: { searchParams: Pr
         <MiniStat label="Low-stock items" icon="boxes" value={lowStock.length} tone={lowStock.length > 0 ? 'amber' : 'green'} href="/inventory?low=1" />
         {!(admin && receivables) && <MiniStat label="Customers owing" icon="customers" value={topOwing.length} href="/customers?owing=1" />}
       </div>
+
+      {newVoids.length > 0 && (
+        <div className="card flex gap-3 border-red-300 bg-red-50 px-4 py-3">
+          <span aria-hidden className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md bg-red-100 text-red-700"><Icon name="receipt" className="h-[17px] w-[17px]" /></span>
+          <div className="min-w-0 flex-1 text-[13px]">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="font-semibold text-red-900">Cancelled receipts: {newVoids.length}{newVoids.length === 50 ? '+' : ''} not yet seen · {peso(newVoids.reduce((s, r) => s + r.amount, 0))}</div>
+              <div className="flex items-center gap-3">
+                <Link href="/orders/cancelled-receipts" className="link text-xs">See all</Link>
+                <ActionForm action={markAllVoidsSeen} confirm={`Mark all ${newVoids.length} as seen?`}><SubmitButton className="btn-secondary btn-sm">Mark all seen</SubmitButton></ActionForm>
+              </div>
+            </div>
+            <ul className="mt-1.5 divide-y divide-red-100">
+              {newVoids.slice(0, 10).map((r) => (
+                <li key={`${r.kind}-${r.id}`} className="flex flex-wrap items-center justify-between gap-2 py-1.5">
+                  <div className="min-w-0 text-slate-700">
+                    <span className="font-mono font-semibold">{r.receiptNo}</span> · {peso(r.amount)} · {r.customer}
+                    {r.order && <> · <Link href={`/orders/${r.order.id}`} className="link font-mono">{r.order.orderNo}</Link></>}
+                    {r.kind === 'deposit' && ' · advance payment'}
+                    <div className="text-[12px] text-slate-500">Voided {fmtDate(r.voidedAt)}{r.voidedBy ? ` by ${r.voidedBy}` : ''}{r.approvedBy ? ` · approved by ${r.approvedBy}` : ''} — {r.reason ?? 'no reason'}</div>
+                  </div>
+                  <ActionForm action={markVoidSeen.bind(null, r.kind, r.id)}><SubmitButton className="btn-secondary btn-sm">Seen</SubmitButton></ActionForm>
+                </li>
+              ))}
+            </ul>
+            {newVoids.length > 10 && <p className="mt-1 text-[12px] text-slate-500">+ {newVoids.length - 10} more — <Link href="/orders/cancelled-receipts?unseen=1" className="link">see them all</Link>.</p>}
+          </div>
+        </div>
+      )}
 
       {admin && clockAlerts.length > 0 && (
         <div className="card flex gap-3 border-amber-300 bg-amber-50 px-4 py-3">
