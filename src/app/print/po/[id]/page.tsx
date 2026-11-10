@@ -6,6 +6,7 @@ import { PrintHeader } from '@/components/PrintHeader';
 import { fmtQty, peso } from '@/lib/money';
 import { fmtDate } from '@/lib/dates';
 import { PO_STATUS } from '@/lib/labels';
+import { rollLength } from '@/lib/rolls';
 
 export const metadata = { title: 'Purchase order' };
 
@@ -18,7 +19,7 @@ export default async function PrintPOPage({ params }: { params: Promise<{ id: st
       include: {
         supplier: true,
         createdBy: { select: { name: true } },
-        items: { orderBy: { id: 'asc' }, include: { material: { select: { name: true, unit: true, sku: true } } } },
+        items: { orderBy: { id: 'asc' }, include: { material: { select: { name: true, unit: true, sku: true, rollLengthM: true } } } },
       },
     }),
     getSettings(),
@@ -61,9 +62,10 @@ export default async function PrintPOPage({ params }: { params: Promise<{ id: st
             <tr key={i.id} className="border-b border-slate-300">
               <td className="py-1.5 pr-2">{idx + 1}</td>
               <td className="py-1.5 pr-2">{i.material.name}{i.material.sku && <span className="text-slate-600"> ({i.material.sku})</span>}</td>
-              <td className="py-1.5 pr-2 text-right">{fmtQty(i.quantity)}</td>
-              <td className="py-1.5 pr-2">{i.material.unit}</td>
-              <td className="py-1.5 pr-2 text-right">{peso(i.unitCost)}</td>
+              {/* Roll paper is ordered by the roll (the PO keeps it in cm). */}
+              <td className="py-1.5 pr-2 text-right">{rollLength(i.material) ? fmtQty(Math.round((i.quantity / rollLength(i.material)) * 1000) / 1000) : fmtQty(i.quantity)}</td>
+              <td className="py-1.5 pr-2">{rollLength(i.material) ? 'roll' : i.material.unit}</td>
+              <td className="py-1.5 pr-2 text-right">{peso(rollLength(i.material) ? Math.round(i.unitCost * rollLength(i.material)) : i.unitCost)}</td>
               <td className="py-1.5 text-right">{peso(i.lineTotal)}</td>
             </tr>
           ))}

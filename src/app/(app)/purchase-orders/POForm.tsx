@@ -3,9 +3,10 @@
 import { useMemo, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { centavosToInput, fmtQty, peso, toCentavos } from '@/lib/money';
+import { fmtRolls, rollLength } from '@/lib/rolls';
 import { createPurchaseOrder, updatePurchaseOrder, type POPayload } from './actions';
 
-export type POMaterial = { id: number; name: string; unit: string; unitCost: number; supplierId: number | null; sku: string | null; stock: number };
+export type POMaterial = { id: number; name: string; unit: string; unitCost: number; supplierId: number | null; sku: string | null; stock: number; rollLengthM: number | null };
 type Line = { key: number; materialId: string; quantity: string; unitCost: string };
 
 export type POInitial = {
@@ -32,9 +33,16 @@ export function POForm({ poId, suppliers, materials, initial }: {
   const [orderDate, setOrderDate] = useState(initial.orderDate);
   const [expectedDate, setExpectedDate] = useState(initial.expectedDate);
   const [notes, setNotes] = useState(initial.notes);
+  // Roll paper is ordered by the roll (qty in rolls, cost per roll); the PO keeps it in the material's unit (cm).
+  const rollLen = (id: number | string) => { const m = materials.find((x) => x.id === Number(id)); return m ? rollLength(m) : 0; };
   const [lines, setLines] = useState<Line[]>(() =>
     initial.items.length
-      ? initial.items.map((i) => ({ key: ++seq, materialId: String(i.materialId), quantity: String(i.quantity), unitCost: centavosToInput(i.unitCost) }))
+      ? initial.items.map((i) => {
+        const len = rollLen(i.materialId);
+        return len
+          ? { key: ++seq, materialId: String(i.materialId), quantity: String(Math.round((i.quantity / len) * 1000) / 1000), unitCost: centavosToInput(Math.round(i.unitCost * len)) }
+          : { key: ++seq, materialId: String(i.materialId), quantity: String(i.quantity), unitCost: centavosToInput(i.unitCost) };
+      })
       : [blank()],
   );
   const [onlySupplier, setOnlySupplier] = useState(true);
@@ -53,7 +61,7 @@ export function POForm({ poId, suppliers, materials, initial }: {
   const update = (key: number, patch: Partial<Line>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
   const pickMaterial = (key: number, materialId: string) => {
     const m = matById.get(Number(materialId));
-    update(key, { materialId, unitCost: m ? centavosToInput(m.unitCost) : '' });
+    update(key, { materialId, unitCost: m ? centavosToInput(Math.round(m.unitCost * (rollLength(m) || 1))) : '' });
   };
 
   const submit = (e: React.FormEvent) => {
@@ -64,7 +72,7 @@ export function POForm({ poId, suppliers, materials, initial }: {
       orderDate,
       expectedDate,
       notes,
-      items: lines.filter((l) => l.materialId || l.quantity).map((l) => ({ materialId: Number(l.materialId), quantity: l.quantity, unitCost: l.unitCost })),
+      items: lines.filter((l) => l.materialId || l.quantity).map((l) => ({ materialId: Number(l.materialId), quantity: l.quantity, unitCost: l.unitCost, byRoll: rollLen(l.materialId) > 0 })),
     };
     startTransition(async () => {
       const res = poId ? await updatePurchaseOrder(poId, payload) : await createPurchaseOrder(payload);
@@ -114,19 +122,20 @@ export function POForm({ poId, suppliers, materials, initial }: {
             {lines.map((l, idx) => {
               const m = matById.get(Number(l.materialId));
               const opts = m && !pickable.includes(m) ? [m, ...pickable] : pickable;
+              const len = m ? rollLength(m) : 0;
               return (
                 <div key={l.key} className="grid grid-cols-2 gap-2 rounded-md border border-slate-200 p-2 sm:grid-cols-[1fr_7rem_8rem_8rem_2rem] sm:border-0 sm:p-0">
                   <div className="col-span-2 sm:col-span-1">
                     <select value={l.materialId} onChange={(e) => pickMaterial(l.key, e.target.value)} className="input" aria-label={`Line ${idx + 1} material`}>
                       <option value="">— material —</option>
-                      {opts.map((o) => <option key={o.id} value={o.id}>{o.name}{o.sku ? ` (${o.sku})` : ''} · {o.unit}</option>)}
+                      {opts.map((o) => <option key={o.id} value={o.id}>{o.name}{o.sku ? ` (${o.sku})` : ''} · {rollLength(o) ? 'roll' : o.unit}</option>)}
                     </select>
-                    {m && <span className="mt-0.5 block text-xs text-slate-500">In stock: {fmtQty(m.stock)} {m.unit}</span>}
+                    {m && <span className="mt-0.5 block text-xs text-slate-500">In stock: {len ? `${fmtRolls(m.stock, m)} (${fmtQty(m.stock)} ${m.unit}) · 1 roll = ${fmtQty(len)} ${m.unit}` : `${fmtQty(m.stock)} ${m.unit}`}</span>}
                   </div>
                   <input type="number" step="0.001" min="0.001" value={l.quantity} onChange={(e) => update(l.key, { quantity: e.target.value })}
-                    placeholder={m ? `Qty (${m.unit})` : 'Qty'} className="input" aria-label={`Line ${idx + 1} quantity`} />
+                    placeholder={m ? `Qty (${len ? 'roll' : m.unit})` : 'Qty'} className="input" aria-label={`Line ${idx + 1} quantity`} />
                   <input inputMode="decimal" value={l.unitCost} onChange={(e) => update(l.key, { unitCost: e.target.value })}
-                    placeholder="Unit cost" className="input" aria-label={`Line ${idx + 1} unit cost`} />
+                    placeholder={len ? 'Cost per roll' : 'Unit cost'} className="input" aria-label={`Line ${idx + 1} unit cost`} />
                   <div className="flex items-center text-sm font-medium sm:justify-end">{peso(lineTotal(l))}</div>
                   <button type="button" onClick={() => setLines((ls) => (ls.length > 1 ? ls.filter((x) => x.key !== l.key) : [blank()]))}
                     className="btn-secondary btn-sm justify-self-end" title="Remove line">✕</button>

@@ -720,7 +720,8 @@ model PurchaseOrderItem {
   material        Material      @relation(fields: [materialId], references: [id])
   quantity        Float
   receivedQty     Float         @default(0)
-  unitCost        Int
+  /// Centavos per material unit (may hold fractions of a centavo, e.g. roll paper per cm).
+  unitCost        Float
   lineTotal       Int
 
   @@map("purchase_order_items")

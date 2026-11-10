@@ -10,7 +10,7 @@ export async function poFormOptions(keep: { supplierId?: number | null; material
     }),
     prisma.material.findMany({
       where: { OR: [{ active: true }, { id: { in: keep.materialIds ?? [] } }] }, orderBy: { name: 'asc' },
-      select: { id: true, name: true, unit: true, unitCost: true, supplierId: true, sku: true, stock: true },
+      select: { id: true, name: true, unit: true, unitCost: true, supplierId: true, sku: true, stock: true, rollLengthM: true },
     }),
   ]);
   return { suppliers, materials: materials as POMaterial[] };

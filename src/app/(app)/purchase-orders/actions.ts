@@ -7,6 +7,7 @@ import { attempt, logActionError, str, type ActionState } from '@/lib/action';
 import { audit } from '@/lib/audit';
 import { nextNumber } from '@/lib/counters';
 import { fmtQty, peso, round3, toCentavos } from '@/lib/money';
+import { rollLength } from '@/lib/rolls';
 import { parseDateInput, todayManila } from '@/lib/dates';
 import { receivePurchaseOrder } from '@/lib/inventory';
 
@@ -15,12 +16,13 @@ export type POPayload = {
   orderDate: string; // YYYY-MM-DD
   expectedDate: string; // YYYY-MM-DD or ''
   notes: string;
-  items: { materialId: number; quantity: number | string; unitCost: string }[]; // unitCost in pesos
+  /** unitCost in pesos. byRoll (roll paper): quantity in rolls and unitCost per roll; stored per the material's unit (cm). */
+  items: { materialId: number; quantity: number | string; unitCost: string; byRoll?: boolean }[];
 };
 
 export type POResult = { error?: string; ok?: string; id?: number };
 
-function validate(p: POPayload) {
+async function validate(p: POPayload) {
   const supplierId = Number(p.supplierId);
   if (!supplierId) throw new Error('Choose a supplier.');
   const orderDay = parseDateInput(p.orderDate || todayManila());
@@ -31,14 +33,22 @@ function validate(p: POPayload) {
     expectedDate = parseDateInput(p.expectedDate);
     if (!expectedDate) throw new Error('Invalid expected date.');
   }
+  const rolls = new Map((await prisma.material.findMany({
+    where: { id: { in: (p.items ?? []).filter((it) => it.byRoll).map((it) => Number(it.materialId) || 0) } }, select: { id: true, unit: true, rollLengthM: true },
+  })).map((m) => [m.id, rollLength(m)]));
   const items = (p.items ?? []).map((it, i) => {
     const materialId = Number(it.materialId);
-    const quantity = round3(Number(it.quantity));
-    const unitCost = toCentavos(it.unitCost);
+    const qty = round3(Number(it.quantity));
+    const cost = toCentavos(it.unitCost);
     if (!materialId) throw new Error(`Line ${i + 1}: choose a material.`);
-    if (!Number.isFinite(quantity) || quantity <= 0) throw new Error(`Line ${i + 1}: quantity must be greater than zero.`);
-    if (!Number.isFinite(unitCost) || unitCost < 0) throw new Error(`Line ${i + 1}: enter a valid unit cost.`);
-    return { materialId, quantity, unitCost, lineTotal: Math.round(quantity * unitCost) };
+    if (!Number.isFinite(qty) || qty <= 0) throw new Error(`Line ${i + 1}: quantity must be greater than zero.`);
+    if (!Number.isFinite(cost) || cost < 0) throw new Error(`Line ${i + 1}: enter a valid unit cost.`);
+    const len = it.byRoll ? rolls.get(materialId) ?? 0 : 0;
+    if (it.byRoll && !len) throw new Error(`Line ${i + 1}: this material has no roll length — set it on the material first.`);
+    // By roll: rolls × price per roll, kept as length × cost per length unit so stock and costing stay in cm.
+    return len
+      ? { materialId, quantity: round3(qty * len), unitCost: Math.round((cost / len) * 10_000) / 10_000, lineTotal: Math.round(qty * cost) }
+      : { materialId, quantity: qty, unitCost: cost, lineTotal: Math.round(qty * cost) };
   });
   if (items.length === 0) throw new Error('Add at least one item.');
   const total = items.reduce((s, i) => s + i.lineTotal, 0);
@@ -59,7 +69,7 @@ async function wrap(fn: () => Promise<POResult>): Promise<POResult> {
 export async function createPurchaseOrder(payload: POPayload): Promise<POResult> {
   return wrap(async () => {
     const user = await assertUser('purchasing');
-    const v = validate(payload);
+    const v = await validate(payload);
     const po = await prisma.$transaction(async (tx) => {
       await tx.supplier.findUniqueOrThrow({ where: { id: v.supplierId } });
       const mats = await tx.material.count({ where: { id: { in: v.items.map((i) => i.materialId) } } });
@@ -86,7 +96,7 @@ export async function createPurchaseOrder(payload: POPayload): Promise<POResult>
 export async function updatePurchaseOrder(id: number, payload: POPayload): Promise<POResult> {
   return wrap(async () => {
     const user = await assertUser('purchasing');
-    const v = validate(payload);
+    const v = await validate(payload);
     await prisma.$transaction(async (tx) => {
       const before = await tx.purchaseOrder.findUniqueOrThrow({ where: { id }, include: { items: true } });
       if (before.status !== 'DRAFT') throw new Error('Only draft purchase orders can be edited.');
@@ -161,7 +171,7 @@ export async function cancelPurchaseOrder(id: number, _prev: ActionState, fd: Fo
   });
 }
 
-/** Receive form: fields `qty_<itemId>` hold the quantity received now. */
+/** Receive form: fields `qty_<itemId>` hold the quantity received now (`rolls_<itemId>` in rolls, for roll paper). */
 export async function receivePO(id: number, _prev: ActionState, fd: FormData): Promise<ActionState> {
   return attempt(async () => {
     const user = await assertUser('purchasing');
@@ -173,9 +183,13 @@ export async function receivePO(id: number, _prev: ActionState, fd: FormData): P
       }
       const receipts: { itemId: number; qty: number }[] = [];
       for (const item of po.items) {
-        const raw = str(fd, `qty_${item.id}`);
+        const rawRolls = str(fd, `rolls_${item.id}`);
+        const len = rollLength(item.material);
+        const raw = rawRolls !== '' && len ? rawRolls : str(fd, `qty_${item.id}`);
         if (raw === '') continue;
-        const qty = round3(Number(raw));
+        let qty = round3(Number(raw) * (raw === rawRolls && len ? len : 1));
+        // Receiving every remaining roll: take exactly what is left (no rounding crumbs).
+        if (raw === rawRolls && Math.abs(qty - (item.quantity - item.receivedQty)) < 0.01) qty = round3(item.quantity - item.receivedQty);
         if (!Number.isFinite(qty) || qty < 0) throw new Error(`${item.material.name}: enter a valid quantity.`);
         if (qty === 0) continue;
         const remaining = round3(item.quantity - item.receivedQty);

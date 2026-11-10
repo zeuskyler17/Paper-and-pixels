@@ -12,6 +12,15 @@ import { receivedPercent } from '../_lib';
 import { SupplierPaymentForm, SupplierPaymentsTable } from '../../suppliers/SupplierPayments';
 import { receivedValue } from '../../suppliers/_payables';
 import { MovementsTable, movementInclude } from '../../inventory/MovementsTable';
+import { rollLength } from '@/lib/rolls';
+
+/** Roll paper on a PO: "2 rolls" / "1.5 rolls"; null when the material is not roll paper. */
+function rolls(qty: number, m: { unit: string; rollLengthM: number | null }): string | null {
+  const len = rollLength(m);
+  if (!len) return null;
+  const r = Math.round((qty / len) * 1000) / 1000;
+  return `${fmtQty(r)} roll${r === 1 ? '' : 's'}`;
+}
 
 export default async function PurchaseOrderPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requireUser('purchasing');
@@ -21,7 +30,7 @@ export default async function PurchaseOrderPage({ params }: { params: Promise<{ 
     include: {
       supplier: true,
       createdBy: { select: { name: true } },
-      items: { orderBy: { id: 'asc' }, include: { material: { select: { id: true, name: true, unit: true, sku: true } } } },
+      items: { orderBy: { id: 'asc' }, include: { material: { select: { id: true, name: true, unit: true, sku: true, rollLengthM: true } } } },
       payments: { orderBy: [{ paidAt: 'desc' }, { id: 'desc' }], include: { createdBy: { select: { name: true } } } },
     },
   });
@@ -87,9 +96,9 @@ export default async function PurchaseOrderPage({ params }: { params: Promise<{ 
                 {po.items.map((i) => (
                   <tr key={i.id}>
                     <td><Link href={`/inventory/${i.material.id}`} className="link">{i.material.name}</Link>{i.material.sku && <span className="text-xs text-slate-500"> · {i.material.sku}</span>}</td>
-                    <td className="whitespace-nowrap text-right">{fmtQty(i.quantity)} {i.material.unit}</td>
-                    <td className={`whitespace-nowrap text-right ${i.receivedQty >= i.quantity ? 'text-emerald-700' : i.receivedQty > 0 ? 'text-amber-700' : 'text-slate-500'}`}>{fmtQty(i.receivedQty)}</td>
-                    <td className="text-right">{peso(i.unitCost)}</td>
+                    <td className="whitespace-nowrap text-right">{rolls(i.quantity, i.material) ?? `${fmtQty(i.quantity)} ${i.material.unit}`}{rolls(i.quantity, i.material) && <div className="text-xs text-slate-500">{fmtQty(i.quantity)} {i.material.unit}</div>}</td>
+                    <td className={`whitespace-nowrap text-right ${i.receivedQty >= i.quantity ? 'text-emerald-700' : i.receivedQty > 0 ? 'text-amber-700' : 'text-slate-500'}`}>{rolls(i.receivedQty, i.material) ?? fmtQty(i.receivedQty)}</td>
+                    <td className="whitespace-nowrap text-right">{rollLength(i.material) ? <>{peso(Math.round(i.unitCost * rollLength(i.material)))}<span className="text-xs text-slate-500"> / roll</span></> : peso(i.unitCost)}</td>
                     <td className="text-right font-medium">{peso(i.lineTotal)}</td>
                   </tr>
                 ))}
@@ -108,6 +117,12 @@ export default async function PurchaseOrderPage({ params }: { params: Promise<{ 
               {po.items.map((i) => {
                 const remaining = round3(i.quantity - i.receivedQty);
                 if (remaining <= 0) return null;
+                const len = rollLength(i.material);
+                if (len) return (
+                  <Field key={i.id} label={`${i.material.name} (rolls)`} hint={`Remaining ${rolls(remaining, i.material)} of ${rolls(i.quantity, i.material)} · 1 roll = ${fmtQty(len)} ${i.material.unit}`}>
+                    <input name={`rolls_${i.id}`} type="number" step="0.001" min="0" max={Math.round((remaining / len) * 1000) / 1000} defaultValue={Math.round((remaining / len) * 1000) / 1000} className="input" />
+                  </Field>
+                );
                 return (
                   <Field key={i.id} label={i.material.name} hint={`Remaining ${fmtQty(remaining)} of ${fmtQty(i.quantity)} ${i.material.unit}`}>
                     <input name={`qty_${i.id}`} type="number" step="0.001" min="0" max={remaining} defaultValue={remaining} className="input" />
