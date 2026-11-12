@@ -792,7 +792,7 @@ async function dailyReport(day: string): Promise<ReportData> {
       where: { paidAt: { gte: start, lt: end }, voided: false },
       orderBy: { paidAt: 'asc' },
       select: {
-        receiptNo: true, paidAt: true, amount: true, method: true, reference: true,
+        receiptNo: true, paidAt: true, amount: true, method: true, reference: true, notes: true,
         account: { select: { label: true } }, receivedBy: { select: { name: true } },
         customer: { select: { name: true } }, order: { select: { id: true, orderNo: true } },
       },
@@ -801,7 +801,7 @@ async function dailyReport(day: string): Promise<ReportData> {
     prisma.customerDeposit.findMany({
       where: { receivedAt: { gte: start, lt: end }, voided: false },
       orderBy: { receivedAt: 'asc' },
-      select: { id: true, receiptNo: true, receivedAt: true, amount: true, method: true, reference: true, account: { select: { label: true } }, receivedBy: { select: { name: true } }, customer: { select: { id: true, name: true } } },
+      select: { id: true, receiptNo: true, receivedAt: true, amount: true, method: true, reference: true, notes: true, account: { select: { label: true } }, receivedBy: { select: { name: true } }, customer: { select: { id: true, name: true } } },
     }),
     prisma.expense.findMany({
       where: { date: { gte: start, lt: end }, voided: false },
@@ -818,7 +818,7 @@ async function dailyReport(day: string): Promise<ReportData> {
   type PayLike = (typeof allPayments)[number] & { href?: string };
   const advPays = allPayments.filter((p) => p.method === 'ADVANCE');
   const depositRows: PayLike[] = deposits.map((d) => ({
-    receiptNo: d.receiptNo, paidAt: d.receivedAt, amount: d.amount, method: d.method, reference: d.reference, account: d.account, receivedBy: d.receivedBy,
+    receiptNo: d.receiptNo, paidAt: d.receivedAt, amount: d.amount, method: d.method, reference: d.reference, notes: d.notes, account: d.account, receivedBy: d.receivedBy,
     customer: { name: d.customer.name }, order: { id: 0, orderNo: 'Advance payment' }, href: `/customers/${d.customer.id}`,
   }));
   const payments: PayLike[] = [...allPayments.filter((p) => p.method !== 'ADVANCE'), ...depositRows].sort((a, b) => a.paidAt.getTime() - b.paidAt.getTime());
@@ -857,7 +857,7 @@ async function dailyReport(day: string): Promise<ReportData> {
     _href: p.href ?? `/orders/${p.order.id}`,
     receipt: p.receiptNo, time: time.format(p.paidAt), customer: p.customer.name, orderNo: p.order.orderNo,
     method: PAYMENT_METHOD[p.method], account: p.method === 'CASH' ? 'Cash drawer' : p.account?.label ?? '— not specified —',
-    reference: p.reference ?? '', by: p.receivedBy.name, amount: p.amount,
+    reference: p.reference ?? '', notes: p.notes ?? '', by: p.receivedBy.name, amount: p.amount,
   });
   const paymentColumns = [
     { key: 'receipt', label: 'Receipt', type: 'text' },
@@ -870,7 +870,9 @@ async function dailyReport(day: string): Promise<ReportData> {
     { key: 'by', label: 'Received by', type: 'text' },
     { key: 'amount', label: 'Amount', type: 'money' },
   ] as const;
-  const payTotals = (amount: number) => ({ receipt: 'Total', time: null, customer: null, orderNo: null, method: null, account: null, reference: null, by: null, amount });
+  // Cash payments have no reference no., so their table shows the payment notes instead.
+  const cashColumns = paymentColumns.map((c) => (c.key === 'reference' ? { key: 'notes', label: 'Notes', type: 'text' } as const : c));
+  const payTotals = (amount: number) => ({ receipt: 'Total', time: null, customer: null, orderNo: null, method: null, account: null, reference: null, notes: null, by: null, amount });
   const expenseRows: Row[] = expenses.map((e) => ({
     category: e.category.name, details: [e.otherDetail, e.notes].filter(Boolean).join(' — '), via: PAYMENT_METHOD[e.paidVia], by: e.createdBy.name, amount: e.amount,
   }));
@@ -885,7 +887,7 @@ async function dailyReport(day: string): Promise<ReportData> {
     ],
     rows: summary,
     extra: [
-      { title: 'Daily sales collected (CASH payments)', columns: [...paymentColumns], rows: cashPays.map(payRow), totals: payTotals(cashIn) },
+      { title: 'Daily sales collected (CASH payments)', columns: cashColumns, rows: cashPays.map(payRow), totals: payTotals(cashIn) },
       { title: 'Other payments received (GCash / Maya / bank — not part of daily sales)', columns: [...paymentColumns], rows: otherPays.map(payRow), totals: payTotals(otherIn) },
       ...(advPays.length ? [{ title: 'Orders paid from advance payments (money received on an earlier day — not in today\'s totals)', columns: [...paymentColumns], rows: advPays.map(payRow), totals: payTotals(advIn) }] : []),
       {
