@@ -5,6 +5,7 @@ import { requireUser } from '@/lib/auth';
 import { customerBalances } from '@/lib/orders';
 import { peso } from '@/lib/money';
 import { fmtDate } from '@/lib/dates';
+import { duplicateGroups } from '@/lib/customerDupes';
 import { Card, Empty, FilterBar, PageHeader, TableWrap, Badge } from '@/components/ui';
 
 export const metadata = { title: 'Customers' };
@@ -20,6 +21,7 @@ export default async function CustomersPage({ searchParams }: { searchParams: SP
     : {};
   const customers = await prisma.customer.findMany({ where, orderBy: { name: 'asc' }, take: 500, include: { _count: { select: { specialPrices: true } } } });
   const balances = await customerBalances(customers.map((c) => c.id));
+  const dupes = user.isAdmin && !q ? await duplicateGroups() : [];
 
   // Balances the owner hid from staff count as hidden (not 0) for non-admin logins: not shown, not sorted, not in "with balance only".
   let rows = customers.map((c) => ({ ...c, hidden: c.balanceHidden && !user.isAdmin, balance: c.balanceHidden && !user.isAdmin ? 0 : balances.get(c.id)?.balance ?? 0, lastOrder: balances.get(c.id)?.lastOrder ?? null }));
@@ -30,6 +32,16 @@ export default async function CustomersPage({ searchParams }: { searchParams: SP
   return (
     <div>
       <PageHeader title="Customers" subtitle={`${rows.length} customers`} actions={<Link href="/customers/new" className="btn-primary">+ New customer</Link>} />
+      {dupes.length > 0 && (
+        <Card title={`Possible duplicate customers (${dupes.length})`} className="mb-4">
+          <p className="mb-2 text-sm text-slate-600">Same name, more than one record. Open the one to remove and use <b>Merge into another customer</b> at the bottom of its page (or <b>Delete</b> if it has no orders).</p>
+          <ul className="space-y-1 text-sm">
+            {dupes.map((g) => (
+              <li key={g[0].id}>{g.map((c, i) => <span key={c.id}>{i ? ' · ' : ''}<Link href={`/customers/${c.id}`} className="link">{c.name} #{c.id}</Link><span className="text-xs text-slate-500"> {c.mobile ?? 'no mobile'}, {c._count.orders} order{c._count.orders === 1 ? '' : 's'}</span></span>)}</li>
+            ))}
+          </ul>
+        </Card>
+      )}
       <Card>
         <FilterBar>
           <input name="q" defaultValue={q} placeholder="Search name, mobile, Facebook" className="input w-64" />

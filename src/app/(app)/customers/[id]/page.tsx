@@ -8,12 +8,13 @@ import { ORDER_STATUS, PAYMENT_METHOD, PAYMENT_STATUS } from '@/lib/labels';
 import { accountLabel } from '@/lib/paymentAccounts';
 import { ActionForm, SubmitButton } from '@/components/ActionForm';
 import { Card, Empty, PageHeader, Stat, StatusBadge, TableWrap } from '@/components/ui';
-import { addDeposit, payCombined, removeCustomerPrice, saveCustomerPrices, setBalanceHidden, setCombineBalances, updateCustomer, voidCombined, voidDeposit } from '../actions';
+import { addDeposit, deleteCustomer, mergeCustomer, payCombined, removeCustomerPrice, saveCustomerPrices, setBalanceHidden, setCombineBalances, updateCustomer, voidCombined, voidDeposit } from '../actions';
 import { CombinedPayFields } from '../CombinedPayFields';
 import { PaymentMethodFields } from '@/components/PaymentMethodFields';
 import { SpecialPriceRows, type SpecialProduct } from '../SpecialPriceRows';
 import { specialPriceLabel } from '@/lib/pricing';
 import { CustomerFields } from '../CustomerFields';
+import { normName } from '@/lib/customerDupes';
 
 export default async function CustomerPage({ params }: { params: Promise<{ id: string }> }) {
   const user = await requireUser('customers');
@@ -56,6 +57,14 @@ export default async function CustomerPage({ params }: { params: Promise<{ id: s
   // Combined balance: unpaid orders oldest first (the order a combined payment is split in).
   const openOrders = active.filter((o) => o.balance > 0).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id - b.id);
   const combined = customer.combineBalances && !customer.isInternal;
+  // Owner/admin: other customers this one can be merged into (same name listed first).
+  const others = user.isAdmin
+    ? (await prisma.customer.findMany({ where: { id: { not: customer.id }, isInternal: customer.isInternal }, orderBy: { name: 'asc' }, select: { id: true, name: true, mobile: true } }))
+      .map((c) => ({ ...c, same: normName(c.name) === normName(customer.name) }))
+      .sort((a, b) => Number(b.same) - Number(a.same))
+    : [];
+  const sameName = others.filter((c) => c.same);
+  const hasHistory = customer.orders.length > 0 || customer.payments.length > 0 || customer.deposits.length > 0 || customer.combinedPayments.length > 0;
 
   return (
     <div className="space-y-4">
@@ -317,6 +326,34 @@ export default async function CustomerPage({ params }: { params: Promise<{ id: s
           <SubmitButton>Save changes</SubmitButton>
         </ActionForm>
       </Card>
+
+      {user.isAdmin && (
+        <Card title="Delete or merge (owner / admin)">
+          {sameName.length > 0 && (
+            <p className="mb-3 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              Possible duplicate: {sameName.map((c, i) => <span key={c.id}>{i ? ', ' : ''}<Link href={`/customers/${c.id}`} className="link">{c.name} #{c.id}</Link>{c.mobile ? ` (${c.mobile})` : ''}</span>)}
+            </p>
+          )}
+          <div className="grid gap-4 md:grid-cols-2">
+            <ActionForm action={mergeCustomer.bind(null, customer.id)} confirm={`Merge ${customer.name} into the chosen customer? All orders, payments, advance payments and points move there, and ${customer.name} #${customer.id} is removed. This can't be undone.`} className="space-y-2">
+              <label className="block">
+                <span className="label">Merge into another customer</span>
+                <select name="targetId" required className="input" defaultValue={sameName[0]?.id ?? ''}>
+                  <option value="">— customer to keep —</option>
+                  {others.map((c) => <option key={c.id} value={c.id}>{c.same ? '★ ' : ''}{c.name} #{c.id}{c.mobile ? ` · ${c.mobile}` : ''}</option>)}
+                </select>
+              </label>
+              <SubmitButton className="btn-secondary">Merge</SubmitButton>
+              <p className="text-xs text-slate-500">Moves this customer&apos;s orders, payments, advance payments, points and special discounts to the chosen customer, fills in their missing mobile / Facebook / email / address, then removes this one. ★ = same name.</p>
+            </ActionForm>
+            <ActionForm action={deleteCustomer.bind(null, customer.id)} confirm={`Delete ${customer.name} #${customer.id}? This can't be undone.`} className="space-y-2">
+              <span className="label">Delete customer</span>
+              {hasHistory ? <button type="button" className="btn-danger" disabled>Delete customer</button> : <SubmitButton className="btn-danger">Delete customer</SubmitButton>}
+              <p className="text-xs text-slate-500">{hasHistory ? 'This customer has orders or payments, so it can\'t be deleted. Merge it into the right customer instead.' : 'Only customers with no orders or payments can be deleted.'}</p>
+            </ActionForm>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }

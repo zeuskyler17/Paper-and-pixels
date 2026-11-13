@@ -13,6 +13,7 @@ import { resolvePaymentAccount } from '@/lib/paymentAccounts';
 import { verifyApprovalPin } from '@/lib/approval';
 import type { PaymentMethod } from '@prisma/client';
 import { recordCombinedPayment, voidCombinedPayment } from '@/lib/combinedPay';
+import { duplicateMessage, findDuplicateCustomer } from '@/lib/customerDupes';
 
 function readCustomer(fd: FormData) {
   const name = str(fd, 'name');
@@ -32,6 +33,8 @@ export async function createCustomer(_prev: ActionState, fd: FormData): Promise<
   const res = await attempt(async () => {
     const user = await assertUser('customers');
     const data = readCustomer(fd);
+    const dup = await findDuplicateCustomer(data.name, data.mobile);
+    if (dup) throw new Error(duplicateMessage(dup));
     const c = await prisma.$transaction(async (tx) => {
       const c = await tx.customer.create({ data });
       await audit(tx, user.id, 'CREATE', 'Customer', c.id, `Created customer ${c.name}`, data);
@@ -244,4 +247,72 @@ export async function voidCombined(combinedId: number, _prev: ActionState, fd: F
   if (customerId) { revalidatePath(`/customers/${customerId}`); revalidatePath('/customers'); revalidatePath('/dashboard'); }
   for (const id of touched) revalidatePath(`/orders/${id}`);
   return res;
+}
+
+// ───────── Owner/admin: delete or merge customers ─────────
+
+/** Owner/admin only: delete a customer that has no orders or payments (e.g. a duplicate created by mistake). */
+export async function deleteCustomer(id: number, _prev: ActionState, _fd: FormData): Promise<ActionState> {
+  const res = await attempt(async () => {
+    const user = await assertUser('admin');
+    await prisma.$transaction(async (tx) => {
+      const c = await tx.customer.findUniqueOrThrow({ where: { id }, include: { _count: { select: { orders: true, payments: true, deposits: true, combinedPayments: true } } } });
+      const n = c._count;
+      if (n.orders || n.payments || n.deposits || n.combinedPayments) {
+        throw new Error(`${c.name} has ${n.orders} order(s) and ${n.payments + n.deposits} payment(s), so it can't be deleted. Use "Merge into another customer" to move them to the right customer first.`);
+      }
+      await tx.customer.delete({ where: { id } });
+      await audit(tx, user.id, 'DELETE', 'Customer', id, `Deleted customer ${c.name}`, { name: c.name, mobile: c.mobile, facebook: c.facebook });
+    });
+    revalidatePath('/customers');
+  });
+  if (res?.error) return res;
+  redirect('/customers');
+}
+
+/** Owner/admin only: move everything of customer `id` (orders, payments, advance payments, points, special discounts)
+ * to customer `targetId`, fill the target's empty contact fields, then delete `id`. */
+export async function mergeCustomer(id: number, _prev: ActionState, fd: FormData): Promise<ActionState> {
+  const targetId = Number(fd.get('targetId'));
+  const res = await attempt(async () => {
+    const user = await assertUser('admin');
+    if (!targetId) throw new Error('Choose the customer to keep.');
+    if (targetId === id) throw new Error('Choose a different customer.');
+    await prisma.$transaction(async (tx) => {
+      const src = await tx.customer.findUniqueOrThrow({ where: { id }, include: { specialPrices: true } });
+      const dst = await tx.customer.findUniqueOrThrow({ where: { id: targetId }, include: { specialPrices: true } });
+      if (src.isInternal !== dst.isInternal) throw new Error('A branch (internal) customer can only be merged with another branch customer.');
+      const [orders, payments, deposits, combined, points] = await Promise.all([
+        tx.order.updateMany({ where: { customerId: id }, data: { customerId: targetId } }),
+        tx.payment.updateMany({ where: { customerId: id }, data: { customerId: targetId } }),
+        tx.customerDeposit.updateMany({ where: { customerId: id }, data: { customerId: targetId } }),
+        tx.combinedPayment.updateMany({ where: { customerId: id }, data: { customerId: targetId } }),
+        tx.pointsEntry.updateMany({ where: { customerId: id }, data: { customerId: targetId } }),
+      ]);
+      // Special discounts: keep the target's own; move the ones it does not have yet.
+      const has = new Set(dst.specialPrices.map((p) => `${p.productId}:${p.optionValueId ?? ''}`));
+      const move = src.specialPrices.filter((p) => !has.has(`${p.productId}:${p.optionValueId ?? ''}`)).map((p) => p.id);
+      if (move.length) await tx.customerPrice.updateMany({ where: { id: { in: move } }, data: { customerId: targetId } });
+      const fill = <K extends 'mobile' | 'facebook' | 'email' | 'address'>(k: K) => dst[k] ?? src[k];
+      await tx.customer.update({
+        where: { id: targetId },
+        data: {
+          mobile: fill('mobile'), facebook: fill('facebook'), email: fill('email'), address: fill('address'),
+          notes: [dst.notes, src.notes].filter(Boolean).join('\n') || null,
+          specialDiscountPct: dst.specialDiscountPct ?? src.specialDiscountPct,
+          balanceHidden: dst.balanceHidden || src.balanceHidden,
+          combineBalances: dst.combineBalances || src.combineBalances,
+          points: dst.points + src.points,
+          pointsCarry: dst.pointsCarry + src.pointsCarry,
+        },
+      });
+      await tx.customer.delete({ where: { id } });
+      const moved = { orders: orders.count, payments: payments.count, deposits: deposits.count, combinedPayments: combined.count, pointsEntries: points.count, specialPrices: move.length };
+      await audit(tx, user.id, 'UPDATE', 'Customer', targetId, `Merged customer ${src.name} (#${id}) into ${dst.name} (#${targetId})`, { merged: { id, name: src.name, mobile: src.mobile, facebook: src.facebook }, moved });
+    });
+    revalidatePath('/customers');
+    revalidatePath('/orders');
+  });
+  if (res?.error) return res;
+  redirect(`/customers/${targetId}`);
 }

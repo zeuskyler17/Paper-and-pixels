@@ -1,5 +1,6 @@
 'use server';
 
+import { duplicateMessage, findDuplicateCustomer } from '@/lib/customerDupes';
 import { revalidatePath } from 'next/cache';
 import type { FileSource, OrderStatus, PaymentMethod, PaymentTerms, Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
@@ -66,6 +67,8 @@ export async function quickCreateCustomer(input: { name: string; mobile: string;
     const name = String(input?.name ?? '').trim();
     if (!name) return { error: 'Customer name is required.' };
     const data = { name, mobile: String(input.mobile ?? '').trim() || null, facebook: String(input.facebook ?? '').trim() || null };
+    const dup = await findDuplicateCustomer(name, data.mobile);
+    if (dup) return { error: duplicateMessage(dup) };
     const c = await prisma.$transaction(async (tx) => {
       const c = await tx.customer.create({ data });
       await audit(tx, user.id, 'CREATE', 'Customer', c.id, `Created customer ${c.name} (from POS)`, data);
