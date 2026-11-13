@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { applySpecialPrice, canTwoTone, computeUnitPrice, coverFamily, fullCoverValue, isTwoToneOption, joinCover, splitCover, pickSpecialPrice, type Selection } from '@/lib/pricing';
+import { applySpecialPrice, computeUnitPrice, coverFamily, fullCoverValue, isTwoToneOption, joinCover, splitCover, pickSpecialPrice, type Selection } from '@/lib/pricing';
 import { centavosToInput, peso, toCentavos, toCentavosOrZero } from '@/lib/money';
 import { FILE_SOURCE, PAYMENT_METHOD, PAYMENT_TERMS, options, MONEY_METHODS } from '@/lib/labels';
 import type { CreateOrderInput, PosCustomer, PosProduct } from '../_lib';
@@ -275,13 +275,12 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
                         const sel = l.selection[o.id];
                         const setSel = (v: number | number[] | null) => update(l.key, { selection: { ...l.selection, [o.id]: v } });
                         if (o.type === 'SELECT') {
-                          // Cover: "Two tone" shows a second dropdown (leather 012 / 001, tela H4 / H6…); stored as [first, second].
+                          // Cover: one cover color (the two tone option was removed; older two tone orders still show both).
                           // "Full cover (FC)" is a checkbox on top of the cover color (the FC value id rides along at the end of the array).
                           const isCover = isTwoToneOption(o);
                           const fcValue = isCover ? fullCoverValue(o) : undefined;
                           const { tones, fc: isFc } = isCover ? splitCover(o, sel) : { tones: [typeof sel === 'number' ? sel : 0], fc: false };
                           const pair = tones.length ? tones : [0];
-                          const twoTone = isCover && pair.length === 2;
                           const store = (t: number[], f: boolean) => setSel(isCover ? joinCover(o, t, f) : t[0] || null);
                           const optLabel = (v: (typeof o.values)[number]) => `${v.label}${v.priceDelta ? ` (${v.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(v.priceDelta))})` : ''}`;
                           // Cover codes grouped by material; FC is not in the list (it is the checkbox).
@@ -294,48 +293,22 @@ export function PosForm({ products, initialCustomer, today, accounts = [], point
                             });
                           };
                           const opts = groupOpts(o.values);
-                          const setPair = (i: number, id: number) => {
-                            const next = [...pair]; next[i] = id;
-                            const [a, b] = next.map((x) => o.values.find((v) => v.id === x));
-                            if (i === 0 && a && b && !canTwoTone(a.label, b.label)) next[1] = 0; // leather ↔ tela: clear the 2nd tone
-                            store(twoTone ? next : [next[0]], isFc);
-                          };
+                          const setColor = (id: number) => store([id], isFc);
                           return (
                             <div key={o.id} className="block">
                               <span className="label flex items-center justify-between gap-2">
                                 <span>{o.name}{o.required ? ' *' : ''}</span>
-                                {isCover && (
-                                  <span className="flex items-center gap-3">
-                                    {fcValue && (
-                                      <label className="flex cursor-pointer items-center gap-1 normal-case text-slate-600">
-                                        <input type="checkbox" checked={isFc} onChange={(e) => store(pair, e.target.checked)} />
-                                        Full cover (FC){fcValue.priceDelta ? ` ${fcValue.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(fcValue.priceDelta))}` : ''}
-                                      </label>
-                                    )}
-                                    <label className="flex cursor-pointer items-center gap-1 normal-case text-slate-600">
-                                      <input type="checkbox" checked={twoTone} onChange={(e) => store(e.target.checked ? [pair[0] || 0, 0] : [pair[0] || 0], isFc)} /> Two tone
-                                    </label>
-                                  </span>
+                                {isCover && fcValue && (
+                                  <label className="flex cursor-pointer items-center gap-1 normal-case text-slate-600">
+                                    <input type="checkbox" checked={isFc} onChange={(e) => store([pair[0] || 0], e.target.checked)} />
+                                    Full cover (FC){fcValue.priceDelta ? ` ${fcValue.priceDelta > 0 ? '+' : '−'}${peso(Math.abs(fcValue.priceDelta))}` : ''}
+                                  </label>
                                 )}
                               </span>
-                              <div className={twoTone ? 'grid grid-cols-2 gap-1.5' : ''}>
-                                <select className="input" value={pair[0] || ''} onChange={(e) => setPair(0, Number(e.target.value) || 0)}>
-                                  <option value="">{o.required ? '— choose —' : '— none —'}</option>
-                                  {opts}
-                                </select>
-                                {twoTone && (() => {
-                                  // Leather (1, 2, 3…) never with tela (H1, H2…); T codes go with anything.
-                                  const firstV = o.values.find((v) => v.id === pair[0]);
-                                  const ok = firstV ? o.values.filter((v) => v.id !== pair[0] && canTwoTone(firstV.label, v.label)) : [];
-                                  const fam = firstV ? coverFamily(firstV.label) : null;
-                                  return (
-                                    <select className="input" value={pair[1] || ''} disabled={!firstV} onChange={(e) => setPair(1, Number(e.target.value) || 0)}>
-                                      <option value="">{!firstV ? '— pick 1st tone —' : `— 2nd tone${fam === 'leather' ? ' (no tela)' : fam === 'tela' ? ' (no leather)' : ''} —`}</option>
-                                      {groupOpts(ok)}
-                                    </select>
-                                  );
-                                })()}
-                              </div>
+                              <select className="input" value={pair[0] || ''} onChange={(e) => setColor(Number(e.target.value) || 0)}>
+                                <option value="">{o.required ? '— choose —' : '— none —'}</option>
+                                {opts}
+                              </select>
                             </div>
                           );
                         }
